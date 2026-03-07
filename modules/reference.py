@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -12,6 +13,16 @@ from config import settings
 from models import Entity, EventLog, ReferenceData, Reminder
 
 logger = logging.getLogger(__name__)
+
+_PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
+
+
+def _load_prompt(name: str) -> str:
+    """Load prompt from /prompts, stripping metadata comment lines."""
+    text = (_PROMPTS_DIR / name).read_text(encoding="utf-8")
+    lines = [line for line in text.splitlines() if not line.startswith("#")]
+    return "\n".join(lines).strip()
+
 
 _TYPE_EMOJI = {
     "person": "👤",
@@ -137,28 +148,7 @@ async def generate_text(user_request: str, db: AsyncSession) -> str:
         context_parts.append(f"[#{item.id}] {item.label} ({item.type}): {fields}")
     context = "\n".join(context_parts)
 
-    system_prompt = (
-        "Ты помощник пользователя. У тебя есть его личные данные:\n\n"
-        f"{context}\n\n"
-        "Правила выбора записей из справочника:\n"
-        "1. Для официальных документов на русском языке (пропуск, заявление, заявка, "
-        "анкета, регистрация, договор и т.п.) — по умолчанию используй Паспорт РФ "
-        "и ФИО с него, если пользователь не указал иное явно.\n"
-        "2. Если пользователь упомянул марку, бренд, тип или название "
-        "(Toyota, BMW, загранпаспорт, паспорт РФ, страховка и т.п.) — "
-        "найди лучшее совпадение в справочнике и используй без вопросов, "
-        "даже если других объектов того же типа несколько.\n"
-        "3. Если нужного типа объект только один — используй без вопросов.\n"
-        "4. Уточняющий вопрос задаётся ТОЛЬКО если пользователь написал обобщённо "
-        "(«моя машина», «мой паспорт») БЕЗ каких-либо уточняющих признаков "
-        "И таких объектов несколько. "
-        "Перечисли варианты нумерованным списком с ключевыми полями.\n"
-        "5. Если данных не хватает — укажи что именно нужно добавить.\n\n"
-        "Пример уточняющего вопроса (только когда признаков действительно нет):\n"
-        "«У тебя несколько машин:\n1. Тойота Камри · А123БВ777\n2. BMW X5 · В456ГД777\n"
-        "Для какой делаем пропуск?»\n\n"
-        "Язык ответа — русский."
-    )
+    system_prompt = _load_prompt("reference_generate.txt").replace("{context}", context)
 
     try:
         response = await _get_client().chat.completions.create(
@@ -222,29 +212,7 @@ async def parse_and_save_reference_from_file(
     raw_text = await extract_text_from_file(file_bytes, filename, mime_type)
     label_from_caption = extract_reference_label(caption)
 
-    system_prompt = """Ты — система извлечения данных из документов для личного справочника.
-
-Из текста или описания документа извлеки данные и верни JSON строго по схеме:
-
-{
-  "type": "person | car | address | document",
-  "label": "краткое название (Загранпаспорт РФ, Паспорт жены, Водительские права, Полис ОСАГО)",
-  "data": {
-    "ключ": "значение"
-  },
-  "end_date": "YYYY-MM-DD или null"
-}
-
-Для type=document: doc_type, series, number, issued_by, issue_date, expiry_date, full_name
-Для type=person: full_name, birth_date, passport_rf, passport_foreign, inn, snils
-Для type=car: brand, model, year, plate, vin, color
-Для type=address: full_address, comment
-
-Правила:
-- Если label передан отдельно — используй его, не придумывай свой
-- Заполняй только поля которые есть в тексте
-- end_date — только дата истечения (не дата выдачи)
-- Отвечай ТОЛЬКО JSON, без пояснений"""
+    system_prompt = _load_prompt("reference_file_parse.txt")
 
     user_content = raw_text if raw_text else f"Документ: {filename}"
     if label_from_caption:
@@ -357,12 +325,7 @@ async def find_reference_item(
         return None
 
     context = "\n".join(f"#{item.id} {item.label} (тип: {item.type})" for item in items)
-    system_prompt = (
-        "Пользователь ищет запись в личном справочнике.\n"
-        f"Доступные записи:\n{context}\n\n"
-        "Верни ТОЛЬКО id нужной записи (просто число) или 0 если ничего не подходит.\n"
-        "Без пояснений."
-    )
+    system_prompt = _load_prompt("reference_find.txt").replace("{context}", context)
 
     try:
         response = await _get_client().chat.completions.create(
@@ -392,28 +355,7 @@ def get_reference_filename(r2_key: str) -> str:
 
 async def parse_and_save_reference(raw_text: str, db: AsyncSession) -> ReferenceData | None:
     """Use OpenAI to extract reference data from free-form text and save it."""
-    system_prompt = """Ты — система извлечения данных для личного справочника.
-
-Из текста пользователя извлеки данные и верни JSON строго по схеме:
-
-{
-  "type": "person | car | address | document",
-  "label": "краткое название (например: Загранпаспорт РФ, Тойота Камри, Дом)",
-  "data": {
-    "ключ": "значение"
-  }
-}
-
-Для type=person поля data: full_name, birth_date, passport_rf, passport_foreign, inn, snils
-Для type=car поля data: brand, model, year, plate, vin, color
-Для type=address поля data: full_address, comment
-Для type=document поля data: doc_type, series, number, issued_by, issue_date, expiry_date
-
-Правила:
-- Заполняй только те поля, которые есть в тексте
-- Пустые поля не включай в data
-- label должен быть конкретным и понятным
-- Отвечай ТОЛЬКО JSON, без пояснений"""
+    system_prompt = _load_prompt("reference_text_parse.txt")
 
     try:
         response = await _get_client().chat.completions.create(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import logging
 from datetime import date
+from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,6 +11,15 @@ from models import ChecklistItem, Entity, EventLog, Reminder, Resource
 from modules import notifications, parser
 
 logger = logging.getLogger(__name__)
+
+_PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
+
+
+def _load_prompt(name: str) -> str:
+    """Load prompt from /prompts, stripping metadata comment lines."""
+    text = (_PROMPTS_DIR / name).read_text(encoding="utf-8")
+    lines = [line for line in text.splitlines() if not line.startswith("#")]
+    return "\n".join(lines).strip()
 
 
 async def process_text(text: str, db: AsyncSession) -> Entity:
@@ -249,10 +259,7 @@ async def _extract_image_text(file_bytes: bytes, mime_type: str) -> str:
                         },
                         {
                             "type": "text",
-                            "text": (
-                                "Извлеки весь текст с изображения. "
-                                "Верни только текст, без пояснений."
-                            ),
+                            "text": _load_prompt("image_ocr.txt"),
                         },
                     ],
                 }

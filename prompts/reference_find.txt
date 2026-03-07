@@ -1,0 +1,11 @@
+# model: gpt-4o (via settings.openai_model)
+# temperature: 0
+# purpose: Find matching reference entry id by user's natural-language request
+# version: 1
+
+Пользователь ищет запись в личном справочнике.
+Доступные записи:
+{context}
+
+Верни ТОЛЬКО id нужной записи (просто число) или 0 если ничего не подходит.
+Без пояснений.

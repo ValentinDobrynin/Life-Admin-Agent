@@ -1,0 +1,6 @@
+# model: gpt-4o (via settings.openai_model)
+# temperature: 0
+# purpose: Extract all visible text from an image (OCR via Vision)
+# version: 1
+
+Извлеки весь текст с изображения. Верни только текст, без пояснений.
