@@ -8,7 +8,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from database import Base
 from models import ChecklistItem, Entity, EventLog, Reminder
-from modules.ingestion import _compute_trigger_date, _parse_date, process_text
+from modules.ingestion import (
+    _compute_trigger_date,
+    _extract_text_from_file,
+    _parse_date,
+    _pdf_first_page_as_image,
+    process_text,
+)
 
 
 @pytest.fixture
@@ -147,6 +153,47 @@ def test_compute_trigger_date_before_n_days() -> None:
     rule = {"rule": "before_N_days", "days": 14}
     result = _compute_trigger_date(rule, entity, date.today())
     assert result == date(2026, 6, 17)
+
+
+@patch("modules.ingestion._extract_image_text", new_callable=AsyncMock)
+@patch("modules.ingestion._pdf_first_page_as_image")
+@patch("modules.ingestion._extract_pdf_text")
+async def test_extract_text_from_file_pdf_scan_uses_vision(
+    mock_pdf_text: MagicMock,
+    mock_to_image: MagicMock,
+    mock_vision: AsyncMock,
+) -> None:
+    """When pdfplumber returns little text, Vision fallback is called."""
+    mock_pdf_text.return_value = "мало"
+    mock_to_image.return_value = b"fake-png-bytes"
+    mock_vision.return_value = "Страховой полис ОСАГО серия ВВВ 123456"
+
+    result = await _extract_text_from_file(b"fake-pdf", "doc.pdf", "application/pdf")
+
+    mock_to_image.assert_called_once_with(b"fake-pdf")
+    mock_vision.assert_called_once_with(b"fake-png-bytes", "image/png")
+    assert result == "Страховой полис ОСАГО серия ВВВ 123456"
+
+
+@patch("modules.ingestion._extract_image_text", new_callable=AsyncMock)
+@patch("modules.ingestion._extract_pdf_text")
+async def test_extract_text_from_file_searchable_pdf_skips_vision(
+    mock_pdf_text: MagicMock,
+    mock_vision: AsyncMock,
+) -> None:
+    """When pdfplumber returns enough text, Vision is NOT called."""
+    mock_pdf_text.return_value = "x" * 200
+
+    result = await _extract_text_from_file(b"fake-pdf", "doc.pdf", "application/pdf")
+
+    mock_vision.assert_not_called()
+    assert result == "x" * 200
+
+
+def test_pdf_first_page_as_image_returns_bytes_on_invalid_input() -> None:
+    """Graceful fallback on broken PDF bytes."""
+    result = _pdf_first_page_as_image(b"not-a-pdf")
+    assert result == b""
 
 
 def test_compute_trigger_date_digest_only_is_tomorrow() -> None:

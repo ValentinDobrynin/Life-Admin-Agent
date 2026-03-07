@@ -175,9 +175,20 @@ async def _extract_text_from_file(
     filename: str,
     mime_type: str,
 ) -> str:
-    """Extract text from PDF or image using pdfplumber / OpenAI Vision."""
+    """Extract text from PDF or image using pdfplumber / OpenAI Vision.
+
+    For PDFs: first tries pdfplumber (fast, free).
+    If result is too short (scan) — converts first page to PNG and uses Vision.
+    """
     if mime_type == "application/pdf" or filename.lower().endswith(".pdf"):
-        return _extract_pdf_text(file_bytes)
+        text = _extract_pdf_text(file_bytes)
+        if len(text) > 100:
+            return text
+        logger.info("PDF text too short (%d chars), falling back to Vision", len(text))
+        image_bytes = _pdf_first_page_as_image(file_bytes)
+        if image_bytes:
+            return await _extract_image_text(image_bytes, "image/png")
+        return text
 
     if mime_type.startswith("image/"):
         return await _extract_image_text(file_bytes, mime_type)
@@ -186,6 +197,7 @@ async def _extract_text_from_file(
 
 
 def _extract_pdf_text(file_bytes: bytes) -> str:
+    """Extract text from a searchable PDF. Returns empty string for scans."""
     try:
         import io
 
@@ -197,6 +209,24 @@ def _extract_pdf_text(file_bytes: bytes) -> str:
     except Exception:
         logger.exception("PDF text extraction failed")
         return ""
+
+
+def _pdf_first_page_as_image(file_bytes: bytes) -> bytes:
+    """Convert the first page of a PDF to PNG bytes for Vision fallback."""
+    try:
+        import io
+
+        import fitz  # pymupdf
+
+        doc = fitz.open(stream=io.BytesIO(file_bytes), filetype="pdf")
+        if not doc.page_count:
+            return b""
+        page = doc[0]
+        pix = page.get_pixmap(dpi=150)
+        return bytes(pix.tobytes("png"))
+    except Exception:
+        logger.exception("PDF to image conversion failed")
+        return b""
 
 
 async def _extract_image_text(file_bytes: bytes, mime_type: str) -> str:
