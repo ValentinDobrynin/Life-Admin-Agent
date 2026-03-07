@@ -41,6 +41,28 @@ async def _handle_message(message: dict[str, Any], db: AsyncSession) -> None:
         await notifications.send_message(START_MESSAGE)
         return
 
+    if text == "/status":
+        from modules.entity_view import get_status_text
+
+        status_text = await get_status_text(db)
+        await notifications.send_message(status_text)
+        return
+
+    if text.startswith("/entity"):
+        parts = text.strip().split()
+        if len(parts) < 2 or not parts[1].isdigit():
+            await notifications.send_message(
+                "Использование: /entity &lt;id&gt;\nНапример: /entity 42"
+            )
+            return
+        entity_id = int(parts[1])
+        from modules.entity_view import get_entity_card_text, make_entity_card_buttons
+
+        card_text = await get_entity_card_text(entity_id, db)
+        buttons = make_entity_card_buttons(entity_id)
+        await notifications.send_message(card_text, buttons=buttons)
+        return
+
     if text and _pending_edit_entity_id is not None:
         entity_id = _pending_edit_entity_id
         _pending_edit_entity_id = None
@@ -160,6 +182,20 @@ async def _handle_callback(callback_query: dict[str, Any], db: AsyncSession) -> 
             reminder.status = "cancelled"
             await db.commit()
         await notifications.send_message("🙈 Больше не напомню об этом.")
+
+    elif data.startswith("pause_"):
+        entity_id = int(data.split("_", 1)[1])
+        from modules.entity_view import pause_entity
+
+        await pause_entity(entity_id, db)
+        await notifications.send_message(f"⏸ Объект #{entity_id} приостановлен.")
+
+    elif data.startswith("archive_"):
+        entity_id = int(data.split("_", 1)[1])
+        from modules.entity_view import archive_entity
+
+        await archive_entity(entity_id, db)
+        await notifications.send_message(f"🗄 Объект #{entity_id} перемещён в архив.")
 
     elif data.startswith("attach_"):
         entity_id = int(data.split("_", 1)[1])
