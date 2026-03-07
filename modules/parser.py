@@ -130,3 +130,20 @@ def detect_intent(text: str) -> str:
         return "reference_add"
 
     return "entity"
+
+
+def is_send_file_request(text: str) -> bool:
+    """Return True if user is asking the bot to send a file from the reference directory.
+
+    Uses narrow triggers only to avoid false positives on general imperatives.
+    """
+    lower = text.lower().strip()
+    triggers = [
+        "пришли ",
+        "скинь ",
+        "дай скан",
+        "дай фото",
+        "где мои права",
+        "где мой паспорт",
+    ]
+    return any(lower.startswith(t) or t in lower for t in triggers)

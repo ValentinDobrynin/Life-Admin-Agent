@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
-from models import ReferenceData
+from models import Entity, EventLog, ReferenceData, Reminder
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +26,12 @@ _TYPE_NAMES = {
     "address": "Адреса",
     "document": "Документы",
 }
+
+# These types always get an entity created (for tracking and reminders)
+_TYPES_WITH_ENTITY = {"document", "person"}
+
+# Caption trigger words for reference flow
+_REFERENCE_TRIGGERS = ["справочник", "в справочник", "сохрани в справочник"]
 
 
 def _get_client() -> AsyncOpenAI:
@@ -163,6 +169,212 @@ async def generate_text(user_request: str, db: AsyncSession) -> str:
     except Exception:
         logger.exception("Text generation failed")
         return "❌ Ошибка при генерации текста. Попробуй ещё раз."
+
+
+def is_reference_caption(caption: str) -> bool:
+    """Return True if file caption indicates reference storage intent."""
+    if not caption:
+        return False
+    lower = caption.lower().strip()
+    return any(
+        lower == t or lower.startswith(t + ":") or lower.startswith(t + " ")
+        for t in _REFERENCE_TRIGGERS
+    )
+
+
+def extract_reference_label(caption: str) -> str | None:
+    """Extract label from caption like 'справочник: мой загранпаспорт'.
+
+    Returns the label after the colon, or None if only a trigger word was given.
+    """
+    lower = caption.lower().strip()
+    for trigger in _REFERENCE_TRIGGERS:
+        if lower.startswith(trigger + ":"):
+            label = caption[len(trigger) + 1 :].strip()
+            return label if label else None
+    return None
+
+
+async def parse_and_save_reference_from_file(
+    file_bytes: bytes,
+    filename: str,
+    mime_type: str,
+    caption: str,
+    db: AsyncSession,
+) -> tuple[ReferenceData, Entity | None]:
+    """Parse a file (photo or PDF), save to reference_data, create entity if needed.
+
+    Entity is always created for document and person types (even without end_date).
+    For car and address — no entity.
+    Returns (reference_item, entity_or_none).
+    """
+    from datetime import date, timedelta
+
+    from modules import storage
+    from modules.ingestion import extract_text_from_file, parse_date
+
+    r2_key = storage.upload_file(file_bytes, filename, prefix="reference")
+    raw_text = await extract_text_from_file(file_bytes, filename, mime_type)
+    label_from_caption = extract_reference_label(caption)
+
+    system_prompt = """Ты — система извлечения данных из документов для личного справочника.
+
+Из текста или описания документа извлеки данные и верни JSON строго по схеме:
+
+{
+  "type": "person | car | address | document",
+  "label": "краткое название (Загранпаспорт РФ, Паспорт жены, Водительские права, Полис ОСАГО)",
+  "data": {
+    "ключ": "значение"
+  },
+  "end_date": "YYYY-MM-DD или null"
+}
+
+Для type=document: doc_type, series, number, issued_by, issue_date, expiry_date, full_name
+Для type=person: full_name, birth_date, passport_rf, passport_foreign, inn, snils
+Для type=car: brand, model, year, plate, vin, color
+Для type=address: full_address, comment
+
+Правила:
+- Если label передан отдельно — используй его, не придумывай свой
+- Заполняй только поля которые есть в тексте
+- end_date — только дата истечения (не дата выдачи)
+- Отвечай ТОЛЬКО JSON, без пояснений"""
+
+    user_content = raw_text if raw_text else f"Документ: {filename}"
+    if label_from_caption:
+        user_content = f"Тип документа: {label_from_caption}\n\n{user_content}"
+
+    try:
+        response = await _get_client().chat.completions.create(
+            model=settings.openai_model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.1,
+        )
+        parsed = json.loads(response.choices[0].message.content or "{}")
+    except Exception:
+        logger.exception("Reference file parsing failed")
+        parsed = {}
+
+    ref_type = parsed.get("type", "document")
+    ref_label = label_from_caption or parsed.get("label") or filename
+    ref_data = parsed.get("data", {})
+    end_date_str: str | None = parsed.get("end_date")
+
+    ref_item = ReferenceData(
+        type=ref_type,
+        label=ref_label,
+        data=ref_data,
+        r2_key=r2_key,
+    )
+    db.add(ref_item)
+    await db.flush()
+    await db.refresh(ref_item)
+
+    entity: Entity | None = None
+    if ref_type in _TYPES_WITH_ENTITY:
+        end_date = parse_date(end_date_str) if end_date_str else None
+        entity = Entity(
+            type="document",
+            name=ref_label,
+            end_date=end_date,
+            status="active",
+            priority="normal",
+            notes=f"reference_id:{ref_item.id}",
+        )
+        db.add(entity)
+        await db.flush()
+
+        if end_date:
+            today = date.today()
+            for days in [30, 14, 7]:
+                trigger_date = end_date - timedelta(days=days)
+                if trigger_date >= today:
+                    db.add(
+                        Reminder(
+                            entity_id=entity.id,
+                            rule="before_N_days",
+                            trigger_date=trigger_date,
+                            status="pending",
+                            channel="telegram",
+                        )
+                    )
+
+        db.add(
+            EventLog(
+                entity_id=entity.id,
+                action="entity_created_from_reference",
+                payload={"reference_id": ref_item.id, "label": ref_label},
+            )
+        )
+
+    await db.commit()
+    if entity:
+        await db.refresh(entity)
+    await db.refresh(ref_item)
+
+    logger.info(
+        "Saved reference from file id=%d type=%s label=%s r2_key=%s entity_id=%s",
+        ref_item.id,
+        ref_type,
+        ref_label,
+        r2_key,
+        entity.id if entity else None,
+    )
+    return ref_item, entity
+
+
+async def find_and_send_reference_file(
+    user_request: str,
+    db: AsyncSession,
+) -> str | None:
+    """Find a reference item by label match and return its r2_key.
+
+    Returns r2_key if found, None if not found or no file attached.
+    """
+    items = await get_all_reference(db)
+    items_with_files = [i for i in items if i.r2_key]
+
+    if not items_with_files:
+        return None
+
+    context = "\n".join(f"#{item.id} {item.label} (тип: {item.type})" for item in items_with_files)
+    system_prompt = (
+        "Пользователь просит прислать документ из справочника.\n"
+        f"Доступные документы со сканами:\n{context}\n\n"
+        "Верни ТОЛЬКО id нужного документа (просто число) или 0 если ничего не подходит.\n"
+        "Без пояснений."
+    )
+
+    try:
+        response = await _get_client().chat.completions.create(
+            model=settings.openai_model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_request},
+            ],
+            max_tokens=10,
+            temperature=0,
+        )
+        result_id = int((response.choices[0].message.content or "0").strip())
+    except Exception:
+        logger.exception("Reference file search failed")
+        return None
+
+    if result_id == 0:
+        return None
+
+    found = next((i for i in items_with_files if i.id == result_id), None)
+    return found.r2_key if found else None
+
+
+def get_reference_filename(r2_key: str) -> str:
+    """Extract original filename from r2_key."""
+    return r2_key.split("/")[-1] if "/" in r2_key else r2_key
 
 
 async def parse_and_save_reference(raw_text: str, db: AsyncSession) -> ReferenceData | None:

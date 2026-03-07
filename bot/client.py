@@ -64,6 +64,27 @@ async def download_file(file_path: str) -> bytes:
         return resp.content
 
 
+async def send_document(
+    chat_id: int,
+    file_bytes: bytes,
+    filename: str,
+    caption: str | None = None,
+) -> dict[str, Any]:
+    """Send a file to a Telegram chat."""
+    data: dict[str, str] = {"chat_id": str(chat_id)}
+    if caption:
+        data["caption"] = caption
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            _url("sendDocument"),
+            data=data,
+            files={"document": (filename, file_bytes)},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return resp.json()  # type: ignore[no-any-return]
+
+
 def make_inline_keyboard(buttons: list[list[dict[str, str]]]) -> dict[str, Any]:
     """Build an inline_keyboard reply_markup from a list of button rows."""
     return {"inline_keyboard": buttons}

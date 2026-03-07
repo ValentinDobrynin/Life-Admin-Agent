@@ -23,8 +23,8 @@ async def process_text(text: str, db: AsyncSession) -> Entity:
     entity = Entity(
         type=entity_data.type,
         name=entity_data.name,
-        start_date=_parse_date(entity_data.start_date),
-        end_date=_parse_date(entity_data.end_date),
+        start_date=parse_date(entity_data.start_date),
+        end_date=parse_date(entity_data.end_date),
         notes=entity_data.notes,
         status="active",
         priority="normal",
@@ -92,8 +92,8 @@ async def process_edit(entity_id: int, text: str, db: AsyncSession) -> None:
         entity.name = entity_data.name
     if entity_data.type:
         entity.type = entity_data.type
-    new_start = _parse_date(entity_data.start_date)
-    new_end = _parse_date(entity_data.end_date)
+    new_start = parse_date(entity_data.start_date)
+    new_end = parse_date(entity_data.end_date)
     if new_start:
         entity.start_date = new_start
     if new_end:
@@ -151,7 +151,7 @@ async def process_file(
         return None
 
     # No entity_id → parse file contents via OpenAI Vision and create new entity
-    raw_text = await _extract_text_from_file(file_bytes, filename, mime_type)
+    raw_text = await extract_text_from_file(file_bytes, filename, mime_type)
     if not raw_text:
         raw_text = f"Файл: {filename}"
 
@@ -170,7 +170,7 @@ async def process_file(
     return entity
 
 
-async def _extract_text_from_file(
+async def extract_text_from_file(
     file_bytes: bytes,
     filename: str,
     mime_type: str,
@@ -265,7 +265,7 @@ async def _extract_image_text(file_bytes: bytes, mime_type: str) -> str:
         return ""
 
 
-def _parse_date(value: str | None) -> date | None:
+def parse_date(value: str | None) -> date | None:
     if not value:
         return None
     try:

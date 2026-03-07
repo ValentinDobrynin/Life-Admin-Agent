@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config import settings
 from database import get_db
 from modules import ingestion, notifications
 
@@ -87,7 +88,31 @@ async def _handle_message(message: dict[str, Any], db: AsyncSession) -> None:
         return
 
     if text:
-        from modules.parser import detect_intent
+        from modules.parser import detect_intent, is_send_file_request
+
+        if is_send_file_request(text):
+            from bot import client as tg
+            from modules.reference import find_and_send_reference_file, get_reference_filename
+            from modules.storage import download_file
+
+            r2_key = await find_and_send_reference_file(text, db)
+            if r2_key:
+                try:
+                    file_bytes = download_file(r2_key)
+                    await tg.send_document(
+                        chat_id=settings.telegram_chat_id,
+                        file_bytes=file_bytes,
+                        filename=get_reference_filename(r2_key),
+                    )
+                except Exception:
+                    logger.exception("Failed to send reference file")
+                    await notifications.send_message("❌ Не удалось отправить файл.")
+            else:
+                await notifications.send_message(
+                    "❌ Не нашёл подходящий документ в справочнике.\n"
+                    "Проверь /profile — возможно файл не прикреплён."
+                )
+            return
 
         intent = detect_intent(text)
 
@@ -145,6 +170,21 @@ async def _handle_photo(message: dict[str, Any], db: AsyncSession) -> None:
     filename = f"{file_id}.jpg"
 
     caption: str = message.get("caption", "")
+
+    from modules.reference import is_reference_caption, parse_and_save_reference_from_file
+
+    if is_reference_caption(caption):
+        ref_item, entity = await parse_and_save_reference_from_file(
+            file_bytes, filename, "image/jpeg", caption, db
+        )
+        msg = f"🗂 Сохранил в справочник: <b>{ref_item.label}</b> · #{ref_item.id}"
+        if entity and entity.end_date:
+            msg += f"\n📅 Напомню до {entity.end_date.strftime('%d.%m.%Y')} · /entity {entity.id}"
+        elif entity:
+            msg += f"\n📋 Создал запись без срока · /entity {entity.id}"
+        await notifications.send_message(msg)
+        return
+
     entity_id: int | None = None
     if caption and caption.startswith("#"):
         try:
@@ -173,6 +213,21 @@ async def _handle_document(message: dict[str, Any], db: AsyncSession) -> None:
     file_bytes = await tg.download_file(file_path)
 
     caption: str = message.get("caption", "")
+
+    from modules.reference import is_reference_caption, parse_and_save_reference_from_file
+
+    if is_reference_caption(caption):
+        ref_item, entity = await parse_and_save_reference_from_file(
+            file_bytes, filename, mime_type, caption, db
+        )
+        msg = f"🗂 Сохранил в справочник: <b>{ref_item.label}</b> · #{ref_item.id}"
+        if entity and entity.end_date:
+            msg += f"\n📅 Напомню до {entity.end_date.strftime('%d.%m.%Y')} · /entity {entity.id}"
+        elif entity:
+            msg += f"\n📋 Создал запись без срока · /entity {entity.id}"
+        await notifications.send_message(msg)
+        return
+
     entity_id: int | None = None
     if caption and caption.startswith("#"):
         try:

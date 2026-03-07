@@ -30,13 +30,21 @@ def _get_client() -> object:
 def upload_file(
     file_bytes: bytes,
     filename: str,
-    entity_id: int,
+    entity_id: int = 0,
     content_type: str | None = None,
+    prefix: str = "entities",
 ) -> str:
-    """Upload bytes to R2 and return the r2_key."""
+    """Upload bytes to R2 and return the r2_key.
+
+    When prefix='entities' and entity_id is set, key is entities/{entity_id}/{uuid}.ext.
+    Otherwise key is {prefix}/{uuid}.ext (e.g. reference/uuid.jpg).
+    """
     ext = PurePosixPath(filename).suffix
     unique_name = f"{uuid.uuid4().hex}{ext}"
-    r2_key = f"entities/{entity_id}/{unique_name}"
+    if prefix == "entities" and entity_id:
+        r2_key = f"entities/{entity_id}/{unique_name}"
+    else:
+        r2_key = f"{prefix}/{unique_name}"
 
     if content_type is None:
         content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
@@ -52,7 +60,20 @@ def upload_file(
         logger.info("Uploaded file to R2: %s (%d bytes)", r2_key, len(file_bytes))
         return r2_key
     except ClientError:
-        logger.exception("R2 upload failed for entity %d, file %s", entity_id, filename)
+        logger.exception("R2 upload failed for key %s, file %s", r2_key, filename)
+        raise
+
+
+def download_file(r2_key: str) -> bytes:
+    """Download file from R2 by key. Returns raw bytes."""
+    client = _get_client()
+    try:
+        response = client.get_object(Bucket=settings.r2_bucket_name, Key=r2_key)  # type: ignore[attr-defined]
+        data: bytes = response["Body"].read()
+        logger.info("Downloaded file from R2: %s (%d bytes)", r2_key, len(data))
+        return data
+    except ClientError:
+        logger.exception("R2 download failed for key: %s", r2_key)
         raise
 
 

@@ -10,9 +10,9 @@ from database import Base
 from models import ChecklistItem, Entity, EventLog, Reminder
 from modules.ingestion import (
     _compute_trigger_date,
-    _extract_text_from_file,
-    _parse_date,
     _pdf_first_page_as_image,
+    extract_text_from_file,
+    parse_date,
     process_text,
 )
 
@@ -137,15 +137,15 @@ async def test_process_text_logs_raw_input(
 
 
 def test_parse_date_valid() -> None:
-    assert _parse_date("2026-06-30") == date(2026, 6, 30)
+    assert parse_date("2026-06-30") == date(2026, 6, 30)
 
 
 def test_parse_date_none() -> None:
-    assert _parse_date(None) is None
+    assert parse_date(None) is None
 
 
 def test_parse_date_invalid() -> None:
-    assert _parse_date("not-a-date") is None
+    assert parse_date("not-a-date") is None
 
 
 def test_compute_trigger_date_before_n_days() -> None:
@@ -168,7 +168,7 @@ async def test_extract_text_from_file_pdf_scan_uses_vision(
     mock_to_image.return_value = b"fake-png-bytes"
     mock_vision.return_value = "Страховой полис ОСАГО серия ВВВ 123456"
 
-    result = await _extract_text_from_file(b"fake-pdf", "doc.pdf", "application/pdf")
+    result = await extract_text_from_file(b"fake-pdf", "doc.pdf", "application/pdf")
 
     mock_to_image.assert_called_once_with(b"fake-pdf")
     mock_vision.assert_called_once_with(b"fake-png-bytes", "image/png")
@@ -184,7 +184,7 @@ async def test_extract_text_from_file_searchable_pdf_skips_vision(
     """When pdfplumber returns enough text, Vision is NOT called."""
     mock_pdf_text.return_value = "x" * 200
 
-    result = await _extract_text_from_file(b"fake-pdf", "doc.pdf", "application/pdf")
+    result = await extract_text_from_file(b"fake-pdf", "doc.pdf", "application/pdf")
 
     mock_vision.assert_not_called()
     assert result == "x" * 200
