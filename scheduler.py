@@ -149,29 +149,4 @@ def setup_scheduler() -> AsyncIOScheduler:
         misfire_grace_time=7200,
     )
 
-    # ВРЕМЕННЫЙ ТЕСТ — удалить после проверки
-    if settings.scheduler_test_mode:
-        from datetime import datetime, timedelta
-        from zoneinfo import ZoneInfo
-
-        test_time = datetime.now(tz=ZoneInfo(settings.timezone)) + timedelta(minutes=2)
-        _scheduler.add_job(
-            check_reminders_job,
-            "date",
-            run_date=test_time,
-            id="test_check_reminders",
-            replace_existing=True,
-        )
-        _scheduler.add_job(
-            send_digest_job,
-            "date",
-            run_date=test_time + timedelta(seconds=10),
-            id="test_send_digest",
-            replace_existing=True,
-        )
-        logger.info(
-            "TEST MODE: check_reminders and send_digest scheduled at %s",
-            test_time.strftime("%H:%M:%S"),
-        )
-
     return _scheduler
