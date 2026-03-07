@@ -31,6 +31,7 @@ env/
 .coverage
 htmlcov/
 .mypy_cache/
+*.db
 
 # Alembic
 migrations/versions/*.pyc
