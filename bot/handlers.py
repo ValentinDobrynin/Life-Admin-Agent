@@ -63,6 +63,23 @@ async def _handle_message(message: dict[str, Any], db: AsyncSession) -> None:
         await notifications.send_message(card_text, buttons=buttons)
         return
 
+    if text == "/profile":
+        from modules.reference import get_profile_text
+
+        await notifications.send_message(await get_profile_text(db))
+        return
+
+    if text.startswith("/ref"):
+        parts = text.strip().split()
+        if len(parts) < 2 or not parts[1].isdigit():
+            await notifications.send_message("Использование: /ref &lt;id&gt;\nНапример: /ref 3")
+            return
+        ref_id = int(parts[1])
+        from modules.reference import get_ref_card_text
+
+        await notifications.send_message(await get_ref_card_text(ref_id, db))
+        return
+
     if text and _pending_edit_entity_id is not None:
         entity_id = _pending_edit_entity_id
         _pending_edit_entity_id = None
@@ -70,6 +87,33 @@ async def _handle_message(message: dict[str, Any], db: AsyncSession) -> None:
         return
 
     if text:
+        from modules.parser import detect_intent
+
+        intent = detect_intent(text)
+
+        if intent == "generate":
+            from modules.reference import generate_text
+
+            result = await generate_text(text, db)
+            await notifications.send_message(result)
+            return
+
+        if intent == "reference_add":
+            from modules.reference import parse_and_save_reference
+
+            item = await parse_and_save_reference(text, db)
+            if item:
+                await notifications.send_message(
+                    f"🗂 Сохранил в справочник: <b>{item.label}</b>\n"
+                    f"Тип: {item.type} · #{item.id}\n\n"
+                    f"/profile — посмотреть весь справочник"
+                )
+            else:
+                await notifications.send_message(
+                    "❌ Не удалось распознать данные. Попробуй написать подробнее."
+                )
+            return
+
         await ingestion.process_text(text, db)
         return
 

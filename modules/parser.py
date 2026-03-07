@@ -89,3 +89,44 @@ def _fallback_entity(raw_text: str) -> EntityData:
         checklist_items=[],
         reminder_rules=[{"rule": "digest_only"}],
     )
+
+
+def detect_intent(text: str) -> str:
+    """Detect user intent from message text.
+
+    Returns:
+        'reference_add'  — user wants to add data to the reference directory
+        'generate'       — user wants to generate a text using reference data
+        'entity'         — default: create a life admin entity
+    """
+    text_lower = text.lower()
+
+    generate_keywords = [
+        "сделай сообщение",
+        "напиши сообщение",
+        "составь сообщение",
+        "сделай текст",
+        "напиши текст",
+        "составь текст",
+        "сделай заявление",
+        "напиши заявление",
+        "сгенерируй",
+        "подготовь текст",
+    ]
+    if any(kw in text_lower for kw in generate_keywords):
+        return "generate"
+
+    # Only explicit imperatives — avoids false positives on entity messages
+    # like "загранпаспорт истекает через 3 месяца"
+    reference_keywords = [
+        "добавь в справочник",
+        "сохрани в справочник",
+        "добавь машину",
+        "добавь адрес",
+        "добавь паспорт",
+        "добавь человека",
+    ]
+    if any(kw in text_lower for kw in reference_keywords):
+        return "reference_add"
+
+    return "entity"
