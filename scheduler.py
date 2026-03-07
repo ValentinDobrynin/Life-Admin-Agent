@@ -40,6 +40,8 @@ async def check_reminders_job() -> None:
         for reminder in reminders:
             if not is_urgent(reminder, today):
                 continue
+            if reminder.rule == "digest_only":
+                continue
             if await is_already_reminded_today(reminder.id, db):
                 logger.debug("Reminder %d already sent today, skipping", reminder.id)
                 continue
@@ -85,6 +87,11 @@ async def send_digest_job() -> None:
             items.append((reminder, entity))
 
         await notifications.send_digest(items)  # type: ignore[arg-type]
+
+        from modules.reminders import mark_reminder_sent
+
+        for sent_reminder, _ in items:
+            await mark_reminder_sent(sent_reminder.id, db)  # type: ignore[attr-defined]
 
     logger.info("send_digest_job: digest sent with %d items", len(items))
 

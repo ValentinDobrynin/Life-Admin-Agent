@@ -12,8 +12,10 @@ def _make_openai_response(data: dict) -> MagicMock:
     return response
 
 
-@patch("modules.parser._client")
-async def test_extract_entity_certificate(mock_client: MagicMock) -> None:
+@patch("modules.parser._get_client")
+async def test_extract_entity_certificate(mock_get_client: MagicMock) -> None:
+    mock_client = MagicMock()
+    mock_get_client.return_value = mock_client
     mock_client.chat.completions.create = AsyncMock(
         return_value=_make_openai_response(
             {
@@ -39,8 +41,10 @@ async def test_extract_entity_certificate(mock_client: MagicMock) -> None:
     assert len(result.reminder_rules) == 2
 
 
-@patch("modules.parser._client")
-async def test_extract_entity_trip(mock_client: MagicMock) -> None:
+@patch("modules.parser._get_client")
+async def test_extract_entity_trip(mock_get_client: MagicMock) -> None:
+    mock_client = MagicMock()
+    mock_get_client.return_value = mock_client
     mock_client.chat.completions.create = AsyncMock(
         return_value=_make_openai_response(
             {
@@ -66,8 +70,10 @@ async def test_extract_entity_trip(mock_client: MagicMock) -> None:
     assert result.checklist_items[0]["text"] == "Проверить документы"
 
 
-@patch("modules.parser._client")
-async def test_extract_entity_document(mock_client: MagicMock) -> None:
+@patch("modules.parser._get_client")
+async def test_extract_entity_document(mock_get_client: MagicMock) -> None:
+    mock_client = MagicMock()
+    mock_get_client.return_value = mock_client
     mock_client.chat.completions.create = AsyncMock(
         return_value=_make_openai_response(
             {
@@ -93,8 +99,10 @@ async def test_extract_entity_document(mock_client: MagicMock) -> None:
     assert len(result.reminder_rules) == 3
 
 
-@patch("modules.parser._client")
-async def test_fallback_on_openai_error(mock_client: MagicMock) -> None:
+@patch("modules.parser._get_client")
+async def test_fallback_on_openai_error(mock_get_client: MagicMock) -> None:
+    mock_client = MagicMock()
+    mock_get_client.return_value = mock_client
     mock_client.chat.completions.create = AsyncMock(side_effect=Exception("API error"))
 
     result = await extract_entity("Какой-то текст")
@@ -110,8 +118,10 @@ def test_fallback_entity_truncates_long_text() -> None:
     assert result.notes == long_text
 
 
-@patch("modules.parser._client")
-async def test_extract_entity_with_invalid_json_falls_back(mock_client: MagicMock) -> None:
+@patch("modules.parser._get_client")
+async def test_extract_entity_with_invalid_json_falls_back(mock_get_client: MagicMock) -> None:
+    mock_client = MagicMock()
+    mock_get_client.return_value = mock_client
     response = MagicMock()
     response.choices[0].message.content = "not valid json {"
     mock_client.chat.completions.create = AsyncMock(return_value=response)
@@ -121,8 +131,10 @@ async def test_extract_entity_with_invalid_json_falls_back(mock_client: MagicMoc
     assert result.type == "logistics"
 
 
-@patch("modules.parser._client")
-async def test_extract_entity_missing_fields_use_defaults(mock_client: MagicMock) -> None:
+@patch("modules.parser._get_client")
+async def test_extract_entity_missing_fields_use_defaults(mock_get_client: MagicMock) -> None:
+    mock_client = MagicMock()
+    mock_get_client.return_value = mock_client
     mock_client.chat.completions.create = AsyncMock(
         return_value=_make_openai_response({"type": "payment"})
     )

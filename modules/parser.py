@@ -11,9 +11,11 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-_client = AsyncOpenAI(api_key=settings.openai_api_key)
-
 _PROMPT_PATH = Path(__file__).parent.parent / "prompts" / "entity_parser.txt"
+
+
+def _get_client() -> AsyncOpenAI:
+    return AsyncOpenAI(api_key=settings.openai_api_key)
 
 
 def _load_prompt() -> str:
@@ -45,7 +47,7 @@ async def extract_entity(raw_text: str) -> EntityData:
     system_prompt = _load_prompt()
 
     try:
-        response = await _client.chat.completions.create(
+        response = await _get_client().chat.completions.create(
             model=settings.openai_model,
             messages=[
                 {"role": "system", "content": system_prompt},
