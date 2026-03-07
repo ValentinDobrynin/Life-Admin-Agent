@@ -11,7 +11,8 @@ from database import Base
 from modules.parser import is_send_file_request
 from modules.reference import (
     extract_reference_label,
-    find_and_send_reference_file,
+    find_reference_item,
+    format_ref_data_text,
     get_reference_filename,
     is_reference_caption,
     parse_and_save_reference_from_file,
@@ -220,24 +221,47 @@ async def test_parse_and_save_label_from_caption_takes_priority(db: AsyncSession
     assert ref_item.label == "мой загранпаспорт"
 
 
-# ── find_and_send_reference_file ──────────────────────────────────────────────
+# ── format_ref_data_text ──────────────────────────────────────────────────────
 
 
-async def test_find_and_send_no_items(db: AsyncSession) -> None:
-    result = await find_and_send_reference_file("пришли права", db)
+async def test_format_ref_data_text(db: AsyncSession) -> None:
+    item = await save_reference_item(
+        "document", "Загранпаспорт", {"series": "71 01", "number": "1234567"}, db
+    )
+    text = format_ref_data_text(item)
+    assert "Загранпаспорт" in text
+    assert "71 01" in text
+    assert "1234567" in text
+    assert f"#{item.id}" in text
+
+
+# ── find_reference_item ───────────────────────────────────────────────────────
+
+
+async def test_find_reference_item_no_items(db: AsyncSession) -> None:
+    result = await find_reference_item("пришли права", db)
     assert result is None
 
 
-async def test_find_and_send_no_files(db: AsyncSession) -> None:
-    """Items without r2_key → returns None."""
+async def test_find_reference_item_no_match(db: AsyncSession) -> None:
+    """Returns None when OpenAI says id=0."""
     await save_reference_item("document", "Права", {}, db)
-    result = await find_and_send_reference_file("пришли права", db)
+
+    mock_response = MagicMock()
+    mock_response.choices[0].message.content = "0"
+
+    with patch("modules.reference._get_client") as mock_client:
+        mock_instance = MagicMock()
+        mock_instance.chat.completions.create = AsyncMock(return_value=mock_response)
+        mock_client.return_value = mock_instance
+
+        result = await find_reference_item("пришли несуществующий документ", db)
+
     assert result is None
 
 
-async def test_find_and_send_found(db: AsyncSession) -> None:
+async def test_find_reference_item_found_with_file(db: AsyncSession) -> None:
     item = await save_reference_item("document", "Водительские права", {}, db)
-    # Manually set r2_key since save_reference_item doesn't accept it
     item.r2_key = "reference/rights.jpg"
     await db.commit()
 
@@ -249,6 +273,27 @@ async def test_find_and_send_found(db: AsyncSession) -> None:
         mock_instance.chat.completions.create = AsyncMock(return_value=mock_response)
         mock_client.return_value = mock_instance
 
-        result = await find_and_send_reference_file("пришли права", db)
+        result = await find_reference_item("пришли права", db)
 
-    assert result == "reference/rights.jpg"
+    assert result is not None
+    assert result.id == item.id
+    assert result.r2_key == "reference/rights.jpg"
+
+
+async def test_find_reference_item_found_without_file(db: AsyncSession) -> None:
+    """Items without r2_key are still returned (data shown without file)."""
+    item = await save_reference_item("document", "Паспорт РФ", {"series": "45 05"}, db)
+
+    mock_response = MagicMock()
+    mock_response.choices[0].message.content = str(item.id)
+
+    with patch("modules.reference._get_client") as mock_client:
+        mock_instance = MagicMock()
+        mock_instance.chat.completions.create = AsyncMock(return_value=mock_response)
+        mock_client.return_value = mock_instance
+
+        result = await find_reference_item("пришли паспорт", db)
+
+    assert result is not None
+    assert result.id == item.id
+    assert result.r2_key is None

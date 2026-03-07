@@ -328,25 +328,34 @@ async def parse_and_save_reference_from_file(
     return ref_item, entity
 
 
-async def find_and_send_reference_file(
+def format_ref_data_text(item: ReferenceData) -> str:
+    """Format reference item as readable HTML text for Telegram (caption or message)."""
+    emoji = _TYPE_EMOJI.get(item.type, "🗂")
+    lines = [f"{emoji} <b>{item.label}</b>  <i>#{item.id}</i>"]
+    for key, value in item.data.items():
+        if value:
+            lines.append(f"  {key}: {value}")
+    return "\n".join(lines)
+
+
+async def find_reference_item(
     user_request: str,
     db: AsyncSession,
-) -> str | None:
-    """Find a reference item by label match and return its r2_key.
+) -> ReferenceData | None:
+    """Find a reference item matching the user's natural-language request.
 
-    Returns r2_key if found, None if not found or no file attached.
+    Searches all reference entries (with or without attached files).
+    Returns None if no match found.
     """
     items = await get_all_reference(db)
-    items_with_files = [i for i in items if i.r2_key]
-
-    if not items_with_files:
+    if not items:
         return None
 
-    context = "\n".join(f"#{item.id} {item.label} (тип: {item.type})" for item in items_with_files)
+    context = "\n".join(f"#{item.id} {item.label} (тип: {item.type})" for item in items)
     system_prompt = (
-        "Пользователь просит прислать документ из справочника.\n"
-        f"Доступные документы со сканами:\n{context}\n\n"
-        "Верни ТОЛЬКО id нужного документа (просто число) или 0 если ничего не подходит.\n"
+        "Пользователь ищет запись в личном справочнике.\n"
+        f"Доступные записи:\n{context}\n\n"
+        "Верни ТОЛЬКО id нужной записи (просто число) или 0 если ничего не подходит.\n"
         "Без пояснений."
     )
 
@@ -362,14 +371,13 @@ async def find_and_send_reference_file(
         )
         result_id = int((response.choices[0].message.content or "0").strip())
     except Exception:
-        logger.exception("Reference file search failed")
+        logger.exception("Reference item search failed")
         return None
 
     if result_id == 0:
         return None
 
-    found = next((i for i in items_with_files if i.id == result_id), None)
-    return found.r2_key if found else None
+    return next((i for i in items if i.id == result_id), None)
 
 
 def get_reference_filename(r2_key: str) -> str:

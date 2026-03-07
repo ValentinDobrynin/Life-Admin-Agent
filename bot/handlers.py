@@ -92,25 +92,38 @@ async def _handle_message(message: dict[str, Any], db: AsyncSession) -> None:
 
         if is_send_file_request(text):
             from bot import client as tg
-            from modules.reference import find_and_send_reference_file, get_reference_filename
+            from modules.reference import (
+                find_reference_item,
+                format_ref_data_text,
+                get_reference_filename,
+            )
             from modules.storage import download_file
 
-            r2_key = await find_and_send_reference_file(text, db)
-            if r2_key:
-                try:
-                    file_bytes = download_file(r2_key)
-                    await tg.send_document(
-                        chat_id=settings.telegram_chat_id,
-                        file_bytes=file_bytes,
-                        filename=get_reference_filename(r2_key),
-                    )
-                except Exception:
-                    logger.exception("Failed to send reference file")
-                    await notifications.send_message("❌ Не удалось отправить файл.")
+            ref_item = await find_reference_item(text, db)
+            if ref_item:
+                data_text = format_ref_data_text(ref_item)
+                if ref_item.r2_key:
+                    try:
+                        file_bytes = download_file(ref_item.r2_key)
+                        filename = get_reference_filename(ref_item.r2_key)
+                        caption = data_text if len(data_text) <= 1024 else None
+                        await tg.send_document(
+                            chat_id=settings.telegram_chat_id,
+                            file_bytes=file_bytes,
+                            filename=filename,
+                            caption=caption,
+                        )
+                        if caption is None:
+                            await notifications.send_message(data_text)
+                    except Exception:
+                        logger.exception("Failed to send reference file")
+                        await notifications.send_message("❌ Не удалось отправить файл.")
+                else:
+                    await notifications.send_message(data_text + "\n\n<i>📎 Скан не прикреплён</i>")
             else:
                 await notifications.send_message(
                     "❌ Не нашёл подходящий документ в справочнике.\n"
-                    "Проверь /profile — возможно файл не прикреплён."
+                    "Проверь /profile — возможно запись не добавлена."
                 )
             return
 

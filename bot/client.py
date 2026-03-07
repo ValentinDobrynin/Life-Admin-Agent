@@ -69,9 +69,10 @@ async def send_document(
     file_bytes: bytes,
     filename: str,
     caption: str | None = None,
+    parse_mode: str = "HTML",
 ) -> dict[str, Any]:
     """Send a file to a Telegram chat."""
-    data: dict[str, str] = {"chat_id": str(chat_id)}
+    data: dict[str, str] = {"chat_id": str(chat_id), "parse_mode": parse_mode}
     if caption:
         data["caption"] = caption
     async with httpx.AsyncClient() as client:
