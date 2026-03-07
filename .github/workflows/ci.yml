@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: |
+          python -m ruff format --check .
+          python -m ruff check .
+
+      - name: Type check
+        run: python -m mypy main.py config.py database.py models.py bot/ modules/ api/
+
+      - name: Tests
+        run: python -m pytest
+        env:
+          DATABASE_URL: sqlite+aiosqlite:///./test.db
+          TELEGRAM_BOT_TOKEN: test:token123
+          TELEGRAM_CHAT_ID: "123456789"
+          OPENAI_API_KEY: sk-test-key
+          OPENAI_MODEL: gpt-4o
+          MAILGUN_API_KEY: test-key
+          MAILGUN_DOMAIN: test.example.com
+          R2_ACCOUNT_ID: test-account
+          R2_ACCESS_KEY_ID: test-key-id
+          R2_SECRET_ACCESS_KEY: test-secret
+          R2_BUCKET_NAME: test-bucket
+          GOOGLE_CLIENT_ID: test-client-id
+          GOOGLE_CLIENT_SECRET: test-client-secret
+          GOOGLE_REFRESH_TOKEN: test-refresh-token
+          API_KEY: test-api-key
