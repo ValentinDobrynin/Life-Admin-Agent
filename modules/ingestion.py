@@ -63,6 +63,62 @@ async def process_text(text: str, db: AsyncSession) -> Entity:
     return entity
 
 
+async def process_edit(entity_id: int, text: str, db: AsyncSession) -> None:
+    """Apply a natural-language edit instruction to an existing entity."""
+    from sqlalchemy import select
+
+    from models import Entity
+
+    result = await db.execute(select(Entity).where(Entity.id == entity_id))
+    entity = result.scalar_one_or_none()
+
+    if entity is None:
+        await notifications.send_message(f"❌ Запись #{entity_id} не найдена.")
+        return
+
+    context = (
+        f"Существующая запись (обнови по инструкции пользователя):\n"
+        f"Название: {entity.name}\n"
+        f"Тип: {entity.type}\n"
+        f"Начало: {entity.start_date or '—'}\n"
+        f"Дедлайн: {entity.end_date or '—'}\n"
+        f"Заметки: {entity.notes or '—'}\n\n"
+        f"Инструкция пользователя: {text}"
+    )
+
+    entity_data = await parser.extract_entity(context)
+
+    if entity_data.name and entity_data.name != "Новый объект":
+        entity.name = entity_data.name
+    if entity_data.type:
+        entity.type = entity_data.type
+    new_start = _parse_date(entity_data.start_date)
+    new_end = _parse_date(entity_data.end_date)
+    if new_start:
+        entity.start_date = new_start
+    if new_end:
+        entity.end_date = new_end
+    if entity_data.notes:
+        entity.notes = entity_data.notes
+
+    await db.commit()
+    await db.refresh(entity)
+
+    dates: list[str] = []
+    if entity.start_date:
+        dates.append(entity.start_date.strftime("%d.%m.%Y"))
+    if entity.end_date:
+        dates.append(f"до {entity.end_date.strftime('%d.%m.%Y')}")
+    date_str = " · ".join(dates)
+
+    await notifications.send_message(
+        f"✅ Запись #{entity_id} обновлена.\n"
+        f"<b>{entity.name}</b>" + (f"\n{date_str}" if date_str else "")
+    )
+
+    logger.info("Updated entity id=%d via edit instruction: %.80s", entity_id, text)
+
+
 async def process_file(
     file_bytes: bytes,
     filename: str,

@@ -63,7 +63,7 @@ async def test_ok_callback_answered(
         }
     }
     await handle_update(update, db_session)
-    mock_answer.assert_called_once_with("abc123")
+    mock_answer.assert_called_once_with("abc123", text="✅ Сохранено")
 
 
 @patch("bot.handlers.notifications.send_message", new_callable=AsyncMock)
@@ -86,6 +86,50 @@ async def test_attach_callback_sends_prompt(
     mock_answer.assert_called_once()
     mock_send.assert_called_once()
     assert "#7" in mock_send.call_args[0][0]
+
+
+@patch("bot.handlers.notifications.send_message", new_callable=AsyncMock)
+@patch("bot.client.answer_callback_query", new_callable=AsyncMock)
+async def test_edit_callback_sets_pending_state(
+    mock_answer: AsyncMock,
+    mock_send: AsyncMock,
+    db_session: AsyncSession,
+) -> None:
+    import bot.handlers as handlers
+
+    handlers._pending_edit_entity_id = None
+    update = {
+        "callback_query": {
+            "id": "cb_edit",
+            "data": "edit_99",
+            "from": {"id": 123},
+        }
+    }
+    from bot.handlers import handle_update
+
+    await handle_update(update, db_session)
+    assert handlers._pending_edit_entity_id == 99
+    mock_send.assert_called_once()
+    assert "#99" in mock_send.call_args[0][0]
+
+
+@patch("bot.handlers.ingestion.process_edit", new_callable=AsyncMock)
+@patch("bot.handlers.ingestion.process_text", new_callable=AsyncMock)
+async def test_text_after_edit_callback_calls_process_edit(
+    mock_process_text: AsyncMock,
+    mock_process_edit: AsyncMock,
+    db_session: AsyncSession,
+) -> None:
+    import bot.handlers as handlers
+
+    handlers._pending_edit_entity_id = 99
+    update = {"message": {"text": "перенеси на 20 сентября"}}
+    from bot.handlers import handle_update
+
+    await handle_update(update, db_session)
+    mock_process_edit.assert_called_once_with(99, "перенеси на 20 сентября", db_session)
+    mock_process_text.assert_not_called()
+    assert handlers._pending_edit_entity_id is None
 
 
 @patch("bot.client.get_file", new_callable=AsyncMock)

@@ -11,6 +11,9 @@ from modules import ingestion, notifications
 
 logger = logging.getLogger(__name__)
 
+# Single-user MVP: stores entity_id waiting for edit text from the user.
+_pending_edit_entity_id: int | None = None
+
 START_MESSAGE = (
     "👋 Привет! Я Life Admin Agent.\n\n"
     "Просто напиши мне что нужно запомнить:\n"
@@ -30,10 +33,18 @@ async def handle_update(update: dict[str, Any], db: AsyncSession = Depends(get_d
 
 
 async def _handle_message(message: dict[str, Any], db: AsyncSession) -> None:
+    global _pending_edit_entity_id
+
     text = message.get("text", "")
 
     if text == "/start":
         await notifications.send_message(START_MESSAGE)
+        return
+
+    if text and _pending_edit_entity_id is not None:
+        entity_id = _pending_edit_entity_id
+        _pending_edit_entity_id = None
+        await ingestion.process_edit(entity_id, text, db)
         return
 
     if text:
@@ -114,10 +125,12 @@ async def _handle_callback(callback_query: dict[str, Any], db: AsyncSession) -> 
     callback_id = callback_query.get("id", "")
     data = callback_query.get("data", "")
 
-    await client.answer_callback_query(callback_id)
+    # toast_text is shown as a pop-up in Telegram; empty string = silent dismiss
+    toast_text = ""
 
     if data.startswith("ok_"):
         entity_id = int(data.split("_", 1)[1])
+        toast_text = "✅ Сохранено"
         logger.info("User acknowledged entity id=%d", entity_id)
 
     elif data.startswith("done_"):
@@ -151,12 +164,20 @@ async def _handle_callback(callback_query: dict[str, Any], db: AsyncSession) -> 
     elif data.startswith("attach_"):
         entity_id = int(data.split("_", 1)[1])
         await notifications.send_message(
-            f"📎 Отправь файл или фото — прикреплю к записи #{entity_id}."
+            f"📎 Отправь файл или фото.\n"
+            f"В подписи к файлу напиши <code>#{entity_id}</code> — прикреплю к этой записи."
         )
 
     elif data.startswith("edit_"):
+        global _pending_edit_entity_id
         entity_id = int(data.split("_", 1)[1])
-        await notifications.send_message(f"✏️ Напиши что изменить в записи #{entity_id}.")
+        _pending_edit_entity_id = entity_id
+        await notifications.send_message(
+            f"✏️ Напиши что изменить в записи #{entity_id}.\n"
+            f"<i>Например: перенеси дату на 20 сентября</i>"
+        )
 
     else:
         logger.debug("Unknown callback data: %s", data)
+
+    await client.answer_callback_query(callback_id, text=toast_text)
