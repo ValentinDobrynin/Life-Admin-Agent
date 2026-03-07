@@ -152,8 +152,9 @@ def setup_scheduler() -> AsyncIOScheduler:
     # ВРЕМЕННЫЙ ТЕСТ — удалить после проверки
     if settings.scheduler_test_mode:
         from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
 
-        test_time = datetime.now() + timedelta(minutes=2)
+        test_time = datetime.now(tz=ZoneInfo(settings.timezone)) + timedelta(minutes=2)
         _scheduler.add_job(
             check_reminders_job,
             "date",
