@@ -12,7 +12,8 @@
   "label": "краткое название (например: Загранпаспорт РФ, Тойота Камри, Дом)",
   "data": {
     "ключ": "значение"
-  }
+  },
+  "end_date": "YYYY-MM-DD или null"
 }
 
 Для type=person поля data: full_name, birth_date, passport_rf, passport_foreign, inn, snils
