@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     # App
     render_url: str = ""
     timezone: str = "Europe/Moscow"
+    scheduler_test_mode: bool = False
 
     @property
     def is_production(self) -> bool:
