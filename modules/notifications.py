@@ -55,7 +55,9 @@ async def send_enriched_reminder(enriched: EnrichedReminder) -> None:
 
     if enriched.missing_checklist:
         missing = enriched.missing_checklist[:3]
-        lines.append("❌ Не хватает: " + ", ".join(missing))
+        lines.append("❌ <b>Не хватает:</b>")
+        for item in missing:
+            lines.append(f"  • {item}")
 
     if enriched.note:
         lines.append(f"⚠️ {enriched.note}")
@@ -63,7 +65,14 @@ async def send_enriched_reminder(enriched: EnrichedReminder) -> None:
     if enriched.shortlist:
         lines.append("💡 Идеи: " + " · ".join(enriched.shortlist[:3]))
 
-    buttons = _make_reminder_buttons(reminder.id, entity.id)
+    today = date.today()
+    days_left: int | None = None
+    if entity.start_date:
+        days_left = (entity.start_date - today).days
+    elif entity.end_date:
+        days_left = (entity.end_date - today).days
+
+    buttons = _make_reminder_buttons(reminder.id, entity.id, entity.type, days_left)
     await client.send_message(
         chat_id=settings.telegram_chat_id,
         text="\n".join(lines),
@@ -75,7 +84,15 @@ async def send_reminder(reminder: Reminder, entity: Entity) -> None:
     """Send a basic reminder (without suggestion enrichment)."""
     emoji = _CATEGORY_EMOJI.get(entity.type, "📌")
     text = f"{emoji} <b>{entity.name}</b>{_format_dates(entity)}"
-    buttons = _make_reminder_buttons(reminder.id, entity.id)
+
+    today = date.today()
+    days_left: int | None = None
+    if entity.start_date:
+        days_left = (entity.start_date - today).days
+    elif entity.end_date:
+        days_left = (entity.end_date - today).days
+
+    buttons = _make_reminder_buttons(reminder.id, entity.id, entity.type, days_left)
     await client.send_message(
         chat_id=settings.telegram_chat_id,
         text=text,
@@ -161,7 +178,20 @@ def make_capture_buttons(entity_id: int) -> list[list[dict[str, str]]]:
 def _make_reminder_buttons(
     reminder_id: int,
     entity_id: int,
+    entity_type: str = "",
+    days_left: int | None = None,
 ) -> list[list[dict[str, str]]]:
+    is_urgent_trip = entity_type == "trip" and days_left is not None and days_left <= 2
+    if is_urgent_trip:
+        return [
+            [
+                {"text": "✅ Готово", "callback_data": f"done_{entity_id}"},
+                {"text": "📋 Чеклист", "callback_data": f"checklist_{entity_id}"},
+            ],
+            [
+                {"text": "🙈 Игнор", "callback_data": f"ignore_{reminder_id}"},
+            ],
+        ]
     return [
         [
             {"text": "✅ Готово", "callback_data": f"done_{entity_id}"},

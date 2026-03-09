@@ -395,6 +395,14 @@ async def _handle_callback(callback_query: dict[str, Any], db: AsyncSession) -> 
             f"<i>Например: перенеси дату на 20 сентября</i>"
         )
 
+    elif data.startswith("checklist_"):
+        entity_id = int(data.split("_", 1)[1])
+        from modules.entity_view import get_entity_card_text, make_entity_card_buttons
+
+        card_text = await get_entity_card_text(entity_id, db)
+        buttons = make_entity_card_buttons(entity_id)
+        await notifications.send_message(card_text, buttons=buttons)
+
     elif data.startswith("ref_link_confirm_"):
         parts = data.split("_")
         ref_id = int(parts[3])
