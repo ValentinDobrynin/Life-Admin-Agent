@@ -195,11 +195,12 @@ async def test_parse_and_save_reference_success(db: AsyncSession) -> None:
         mock_instance.chat.completions.create = AsyncMock(return_value=mock_response)
         mock_client.return_value = mock_instance
 
-        item = await parse_and_save_reference(
+        result = await parse_and_save_reference(
             "Добавь в справочник: Тойота Камри, гос.номер А123БВ777", db
         )
 
-    assert item is not None
+    assert result is not None
+    item, _, _2 = result
     assert item.type == "car"
     assert item.label == "Тойота Камри"
     assert item.data["plate"] == "А123БВ777"

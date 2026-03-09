@@ -137,6 +137,10 @@ class ReferenceData(Base):
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     r2_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
     # r2_key — ключ файла в Cloudflare R2 (скан документа)
+    owner_ref_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # owner_ref_id — id записи type=person в той же таблице (мягкая связь без FK)
+    relation: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # relation — роль человека: жена, муж, сын, дочь, мама, папа, друг, подруга, я
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

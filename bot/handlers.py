@@ -76,9 +76,20 @@ async def _handle_message(message: dict[str, Any], db: AsyncSession) -> None:
             await notifications.send_message("Использование: /ref &lt;id&gt;\nНапример: /ref 3")
             return
         ref_id = int(parts[1])
-        from modules.reference import get_ref_card_text
+        from sqlalchemy import select as sa_select
 
-        await notifications.send_message(await get_ref_card_text(ref_id, db))
+        from models import ReferenceData
+        from modules.reference import get_ref_card_text, make_ref_card_buttons
+
+        card_text = await get_ref_card_text(ref_id, db)
+        item_result = await db.execute(sa_select(ReferenceData).where(ReferenceData.id == ref_id))
+        ref_item = item_result.scalar_one_or_none()
+        ref_buttons: list[list[dict[str, str]]] | None = (
+            make_ref_card_buttons(ref_id, has_owner=bool(ref_item and ref_item.owner_ref_id))
+            if ref_item and ref_item.type != "person"
+            else None
+        )
+        await notifications.send_message(card_text, buttons=ref_buttons)
         return
 
     if text and _pending_edit_entity_id is not None:
@@ -137,15 +148,38 @@ async def _handle_message(message: dict[str, Any], db: AsyncSession) -> None:
             return
 
         if intent == "reference_add":
-            from modules.reference import parse_and_save_reference
+            from modules.reference import get_all_persons, parse_and_save_reference
 
-            item = await parse_and_save_reference(text, db)
-            if item:
-                await notifications.send_message(
-                    f"🗂 Сохранил в справочник: <b>{item.label}</b>\n"
-                    f"Тип: {item.type} · #{item.id}\n\n"
-                    f"/profile — посмотреть весь справочник"
+            ref_result = await parse_and_save_reference(text, db)
+            if ref_result:
+                ref_item, ref_entity, auto_linked_person = ref_result
+                msg = (
+                    f"🗂 Сохранил в справочник: <b>{ref_item.label}</b>\n"
+                    f"Тип: {ref_item.type} · #{ref_item.id}"
                 )
+                if auto_linked_person:
+                    msg += f"\n👤 Привязал к: {auto_linked_person.label}"
+                if ref_entity and ref_entity.end_date:
+                    msg += (
+                        f"\n📅 Напомню до {ref_entity.end_date.strftime('%d.%m.%Y')}"
+                        f" · /entity {ref_entity.id}"
+                    )
+                elif ref_entity:
+                    msg += f"\n📋 Создал запись без срока · /entity {ref_entity.id}"
+                msg += "\n\n/profile — посмотреть весь справочник"
+                ref_add_buttons: list[list[dict[str, str]]] | None = None
+                if ref_item.type != "person" and not auto_linked_person:
+                    persons = await get_all_persons(db)
+                    if persons:
+                        ref_add_buttons = [
+                            [
+                                {
+                                    "text": "👤 Привязать к человеку",
+                                    "callback_data": f"ref_link_{ref_item.id}",
+                                }
+                            ]
+                        ]
+                await notifications.send_message(msg, buttons=ref_add_buttons)
             else:
                 await notifications.send_message(
                     "❌ Не удалось распознать данные. Попробуй написать подробнее."
@@ -184,18 +218,36 @@ async def _handle_photo(message: dict[str, Any], db: AsyncSession) -> None:
 
     caption: str = message.get("caption", "")
 
-    from modules.reference import is_reference_caption, parse_and_save_reference_from_file
+    from modules.reference import (
+        get_all_persons,
+        is_reference_caption,
+        parse_and_save_reference_from_file,
+    )
 
     if is_reference_caption(caption):
-        ref_item, entity = await parse_and_save_reference_from_file(
+        ref_item, entity, auto_linked_person = await parse_and_save_reference_from_file(
             file_bytes, filename, "image/jpeg", caption, db
         )
         msg = f"🗂 Сохранил в справочник: <b>{ref_item.label}</b> · #{ref_item.id}"
+        if auto_linked_person:
+            msg += f"\n👤 Привязал к: {auto_linked_person.label}"
         if entity and entity.end_date:
             msg += f"\n📅 Напомню до {entity.end_date.strftime('%d.%m.%Y')} · /entity {entity.id}"
         elif entity:
             msg += f"\n📋 Создал запись без срока · /entity {entity.id}"
-        await notifications.send_message(msg)
+        buttons = None
+        if ref_item.type != "person" and not auto_linked_person:
+            persons = await get_all_persons(db)
+            if persons:
+                buttons = [
+                    [
+                        {
+                            "text": "👤 Привязать к человеку",
+                            "callback_data": f"ref_link_{ref_item.id}",
+                        }
+                    ]
+                ]
+        await notifications.send_message(msg, buttons=buttons)
         return
 
     entity_id: int | None = None
@@ -227,18 +279,36 @@ async def _handle_document(message: dict[str, Any], db: AsyncSession) -> None:
 
     caption: str = message.get("caption", "")
 
-    from modules.reference import is_reference_caption, parse_and_save_reference_from_file
+    from modules.reference import (
+        get_all_persons,
+        is_reference_caption,
+        parse_and_save_reference_from_file,
+    )
 
     if is_reference_caption(caption):
-        ref_item, entity = await parse_and_save_reference_from_file(
+        ref_item, entity, auto_linked_person = await parse_and_save_reference_from_file(
             file_bytes, filename, mime_type, caption, db
         )
         msg = f"🗂 Сохранил в справочник: <b>{ref_item.label}</b> · #{ref_item.id}"
+        if auto_linked_person:
+            msg += f"\n👤 Привязал к: {auto_linked_person.label}"
         if entity and entity.end_date:
             msg += f"\n📅 Напомню до {entity.end_date.strftime('%d.%m.%Y')} · /entity {entity.id}"
         elif entity:
             msg += f"\n📋 Создал запись без срока · /entity {entity.id}"
-        await notifications.send_message(msg)
+        buttons = None
+        if ref_item.type != "person" and not auto_linked_person:
+            persons = await get_all_persons(db)
+            if persons:
+                buttons = [
+                    [
+                        {
+                            "text": "👤 Привязать к человеку",
+                            "callback_data": f"ref_link_{ref_item.id}",
+                        }
+                    ]
+                ]
+        await notifications.send_message(msg, buttons=buttons)
         return
 
     entity_id: int | None = None
@@ -324,6 +394,47 @@ async def _handle_callback(callback_query: dict[str, Any], db: AsyncSession) -> 
             f"✏️ Напиши что изменить в записи #{entity_id}.\n"
             f"<i>Например: перенеси дату на 20 сентября</i>"
         )
+
+    elif data.startswith("ref_link_confirm_"):
+        parts = data.split("_")
+        ref_id = int(parts[3])
+        owner_id = int(parts[4])
+        from sqlalchemy import select as sa_select
+
+        from models import ReferenceData
+        from modules.reference import set_owner
+
+        success = await set_owner(ref_id, owner_id, db)
+        if success:
+            owner_result = await db.execute(
+                sa_select(ReferenceData).where(ReferenceData.id == owner_id)
+            )
+            owner = owner_result.scalar_one_or_none()
+            owner_label = owner.label if owner else f"#{owner_id}"
+            await notifications.send_message(f"✅ Привязал к: <b>{owner_label}</b>")
+        else:
+            await notifications.send_message("❌ Не удалось привязать.")
+
+    elif data == "ref_link_cancel":
+        await notifications.send_message("Отмена.")
+
+    elif data.startswith("ref_link_"):
+        ref_id = int(data.split("_", 2)[2])
+        from modules.reference import get_all_persons
+
+        persons = await get_all_persons(db)
+        if not persons:
+            await notifications.send_message(
+                "👤 В справочнике нет карточек людей.\n"
+                "Добавь: «Добавь в справочник: жена Анастасия Добрынина»"
+            )
+        else:
+            buttons = [
+                [{"text": p.label, "callback_data": f"ref_link_confirm_{ref_id}_{p.id}"}]
+                for p in persons
+            ]
+            buttons.append([{"text": "❌ Отмена", "callback_data": "ref_link_cancel"}])
+            await notifications.send_message("👤 Выбери владельца:", buttons=buttons)
 
     else:
         logger.debug("Unknown callback data: %s", data)

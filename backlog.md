@@ -525,6 +525,51 @@ Google Calendar уже реализован в calendar_bot. Нужно пере
 
 ---
 
+### [FEATURE-014] Карточки людей + привязка документов к владельцу
+
+**Статус:** ✅ Done
+**Приоритет:** Medium
+**Компонент:** `models.py`, `modules/reference.py`, `bot/handlers.py`, `prompts/reference_text_parse.txt`, `prompts/reference_file_parse.txt`, `migrations/versions/5b8c1d2e3f4a_...`
+
+**Описание проблемы**
+Документы, машины и адреса хранились без привязки к конкретному человеку. Невозможно понять чей паспорт или машина, и генерация текста не учитывала связи между людьми и их имуществом.
+
+**Ожидаемое поведение**
+Каждая запись может иметь владельца (`owner_ref_id`). Люди имеют роль (`relation`). Авто-привязка работает по ключевым словам в label. Карточки людей показывают связанные документы.
+
+**Технические детали**
+- `ReferenceData.owner_ref_id: int | None` — мягкая связь без FK на запись type=person
+- `ReferenceData.relation: str | None` — роль: жена, муж, сын, дочь, мама, папа, друг, подруга, я
+- `_normalize_relation`, `_detect_relation_in_label` — хелперы для авто-обнаружения
+- `find_person_by_relation`, `get_all_persons`, `get_owned_items`, `set_owner` — новые функции
+- `_create_entity_for_reference`, `_auto_link_owner` — вынесены как shared helpers
+- `parse_and_save_reference` обновлена: сохраняет relation, создаёт entity+reminders, авто-линкует, возвращает 3-tuple
+- `parse_and_save_reference_from_file` аналогично обновлена → 3-tuple
+- `get_profile_text` показывает owned items под карточкой person
+- `get_ref_card_text` показывает owner для документа/машины/адреса, owned items для person
+- `make_ref_card_buttons` — новая функция с кнопкой привязки/смены владельца
+- `generate_text` включает relation и owned items в контекст
+- `handlers.py` — ref_link_confirm, ref_link_cancel, ref_link callbacks; /ref с кнопками
+- Миграция `5b8c1d2e3f4a_add_owner_ref_id_and_relation_to_reference_data.py`
+
+**Acceptance Criteria**
+- [x] В `reference_data` есть поля `owner_ref_id` и `relation`
+- [x] `find_person_by_relation("жена")` → person с `relation="жена"`
+- [x] Загрузка "загранпаспорт жены" → автопривязка к карточке жены если она есть
+- [x] Загрузка без relation → кнопка "👤 Привязать к человеку"
+- [x] Кнопка показывает список persons → выбор → привязка
+- [x] `/ref <id person>` → список её документов и имущества
+- [x] `/ref <id doc>` → показывает "👤 Владелец: ..."
+- [x] `/profile` → под карточкой person — список её документов
+- [x] `generate_text` использует linked documents при составлении текста
+- [x] Текстовый путь (`parse_and_save_reference`) работает идентично файловому
+- [x] Существующие тесты проходят, добавлены 18 новых тестов
+
+**Resolution**
+Реализованы все пункты ТЗ. Ключевое решение — вынос общей логики (entity creation, auto-link) в `_create_entity_for_reference` и `_auto_link_owner`, что обеспечивает DRY для обоих путей (текст и файл). Миграция создана вручную (autogenerate не работает без live DB).
+
+---
+
 ### [FEATURE-013] Импорт всех событий и дней рождения из Google Calendar
 
 **Статус:** 🆕 To Do
@@ -972,3 +1017,4 @@ owner_id в entities заложен, но логика одного пользо
 | — | FEATURE-011: Напоминание о замене паспорта РФ в 45 лет | 🆕 To Do |
 | — | FEATURE-012: Кастомные сроки уведомлений по типу документа | 🆕 To Do |
 | — | FEATURE-013: Импорт всех событий и дней рождения из Google Calendar | 🆕 To Do |
+| — | FEATURE-014: Карточки людей + привязка документов к владельцу | ✅ Done |
