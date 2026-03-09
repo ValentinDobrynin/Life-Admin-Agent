@@ -3,7 +3,12 @@ from __future__ import annotations
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from modules.parser import _fallback_entity, extract_entity
+from modules.parser import (
+    _fallback_entity,
+    detect_intent,
+    extract_entity,
+    parse_trip_checklist_request,
+)
 
 
 def _make_openai_response(data: dict) -> MagicMock:
@@ -109,6 +114,64 @@ async def test_fallback_on_openai_error(mock_get_client: MagicMock) -> None:
 
     assert result.type == "logistics"
     assert result.reminder_rules == [{"rule": "digest_only"}]
+
+
+# ── detect_intent ─────────────────────────────────────────────────────────────
+
+
+def test_detect_intent_checklist_trip() -> None:
+    assert detect_intent("Собери чеклист вещей для поездки в Дубай") == "checklist_trip"
+    assert detect_intent("Составь чеклист для командировки в Москву") == "checklist_trip"
+    assert detect_intent("список вещей для отпуска") == "checklist_trip"
+    assert detect_intent("что взять в поездку") == "checklist_trip"
+
+
+def test_detect_intent_generate() -> None:
+    assert detect_intent("Напиши сообщение для визы") == "generate"
+
+
+def test_detect_intent_reference_add() -> None:
+    assert detect_intent("Добавь в справочник: паспорт РФ") == "reference_add"
+
+
+def test_detect_intent_entity_default() -> None:
+    assert detect_intent("Поездка в Дубай 20 апреля") == "entity"
+    assert detect_intent("Страховка истекает 1 июля") == "entity"
+
+
+# ── parse_trip_checklist_request ───────────────────────────────────────────────
+
+
+@patch("modules.parser._get_client")
+async def test_parse_trip_checklist_request_success(mock_get_client: MagicMock) -> None:
+    mock_client = MagicMock()
+    mock_get_client.return_value = mock_client
+    mock_client.chat.completions.create = AsyncMock(
+        return_value=_make_openai_response(
+            {
+                "destination": "Дубай",
+                "dates": "20-25 апреля",
+                "trip_type": "отдых",
+                "travelers": "один",
+            }
+        )
+    )
+
+    result = await parse_trip_checklist_request("Собери чеклист для поездки в Дубай 20-25 апреля")
+
+    assert result.get("destination") == "Дубай"
+    assert result.get("trip_type") == "отдых"
+
+
+@patch("modules.parser._get_client")
+async def test_parse_trip_checklist_request_fallback_on_error(mock_get_client: MagicMock) -> None:
+    mock_client = MagicMock()
+    mock_get_client.return_value = mock_client
+    mock_client.chat.completions.create = AsyncMock(side_effect=Exception("API down"))
+
+    result = await parse_trip_checklist_request("поездка куда-то")
+
+    assert result == {}
 
 
 def test_fallback_entity_truncates_long_text() -> None:

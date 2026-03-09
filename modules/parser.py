@@ -95,11 +95,26 @@ def detect_intent(text: str) -> str:
     """Detect user intent from message text.
 
     Returns:
-        'reference_add'  — user wants to add data to the reference directory
-        'generate'       — user wants to generate a text using reference data
-        'entity'         — default: create a life admin entity
+        'reference_add'   — user wants to add data to the reference directory
+        'generate'        — user wants to generate a text using reference data
+        'checklist_trip'  — user wants a packing checklist for a trip
+        'entity'          — default: create a life admin entity
     """
     text_lower = text.lower()
+
+    # checklist_trip — must check before entity to avoid misclassification
+    checklist_triggers = [
+        "собери чеклист",
+        "составь чеклист",
+        "список вещей",
+        "что взять",
+        "что упаковать",
+        "что брать в поездку",
+        "собери список вещей",
+        "помоги собрать чемодан",
+    ]
+    if any(t in text_lower for t in checklist_triggers):
+        return "checklist_trip"
 
     generate_keywords = [
         "сделай сообщение",
@@ -130,6 +145,40 @@ def detect_intent(text: str) -> str:
         return "reference_add"
 
     return "entity"
+
+
+async def parse_trip_checklist_request(text: str) -> dict[str, str]:
+    """Extract trip parameters from user checklist request.
+
+    Returns dict with keys: destination, dates, trip_type, travelers.
+    Values may be empty strings if not detected.
+    """
+    system = (
+        "Извлеки параметры поездки из текста пользователя. "
+        "Верни JSON:\n"
+        "{\n"
+        '  "destination": "город или страна",\n'
+        '  "dates": "даты или количество дней (пустая строка если не указано)",\n'
+        '  "trip_type": "море | горы | город | командировка | отдых",\n'
+        '  "travelers": "один | с женой | с семьёй | с детьми"\n'
+        "}\n"
+        "Отвечай ТОЛЬКО JSON. Если параметр не упомянут — пустая строка."
+    )
+    try:
+        response = await _get_client().chat.completions.create(
+            model=settings.openai_model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": text},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0,
+        )
+        raw: dict[str, str] = json.loads(response.choices[0].message.content or "{}")
+        return raw
+    except Exception:
+        logger.exception("parse_trip_checklist_request failed for: %.100s", text)
+        return {}
 
 
 def is_send_file_request(text: str) -> bool:

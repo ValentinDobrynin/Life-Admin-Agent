@@ -9,7 +9,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from database import Base
 from models import ChecklistItem, Entity, Reminder, Resource
-from modules.suggestions import EnrichedReminder, enrich_reminder
+from modules.suggestions import (
+    EnrichedReminder,
+    enrich_reminder,
+    ensure_trip_checklist,
+    generate_trip_checklist,
+)
 
 
 @pytest.fixture
@@ -180,6 +185,160 @@ async def test_enrich_fallback_on_openai_error(mock_client: MagicMock, db: Async
 
     assert result.next_action != ""
     assert result.shortlist == []
+
+
+# ── generate_trip_checklist ───────────────────────────────────────────────────
+
+
+@patch("modules.suggestions._fetch_trip_context")
+@patch("modules.suggestions._client")
+async def test_generate_trip_checklist_no_entity(
+    mock_client: MagicMock,
+    mock_fetch: AsyncMock,
+    db: AsyncSession,
+) -> None:
+    """No matching entity → returns items list and entity=None."""
+    mock_fetch.return_value = {"weather": "жарко +35°C", "destination_notes": ""}
+    response = MagicMock()
+    response.choices[0].message.content = "загранпаспорт\nстраховка\nсолнцезащитный крем"
+    mock_client.chat.completions.create = AsyncMock(return_value=response)
+
+    items, entity = await generate_trip_checklist(
+        {
+            "destination": "Дубай",
+            "dates": "20-25 апреля",
+            "trip_type": "отдых",
+            "travelers": "один",
+        },
+        db,
+    )
+
+    assert len(items) == 3
+    assert "загранпаспорт" in items
+    assert entity is None
+
+
+@patch("modules.suggestions._fetch_trip_context")
+@patch("modules.suggestions._client")
+async def test_generate_trip_checklist_saves_to_entity(
+    mock_client: MagicMock,
+    mock_fetch: AsyncMock,
+    db: AsyncSession,
+) -> None:
+    """Matching trip entity → checklist items saved with [авто] prefix."""
+    from sqlalchemy import select as sa_select
+
+    entity = Entity(
+        id=None,
+        type="trip",
+        name="Дубай",
+        status="active",
+        start_date=date.today() + timedelta(days=10),
+    )
+    db.add(entity)
+    await db.flush()
+
+    mock_fetch.return_value = {"weather": "ясно +35°C", "destination_notes": ""}
+    response = MagicMock()
+    response.choices[0].message.content = "загранпаспорт\nстраховка"
+    mock_client.chat.completions.create = AsyncMock(return_value=response)
+
+    items, found_entity = await generate_trip_checklist(
+        {"destination": "Дубай", "dates": "", "trip_type": "отдых", "travelers": "один"},
+        db,
+    )
+
+    assert found_entity is not None
+    assert found_entity.id == entity.id
+
+    saved = await db.execute(sa_select(ChecklistItem).where(ChecklistItem.entity_id == entity.id))
+    saved_items = saved.scalars().all()
+    assert len(saved_items) == 2
+    assert all(item.text.startswith("[авто]") for item in saved_items)
+
+
+@patch("modules.suggestions._fetch_trip_context")
+@patch("modules.suggestions._client")
+async def test_generate_trip_checklist_replaces_old_auto_items(
+    mock_client: MagicMock,
+    mock_fetch: AsyncMock,
+    db: AsyncSession,
+) -> None:
+    """Re-generation removes old [авто] items before adding new ones."""
+    from sqlalchemy import select as sa_select
+
+    entity = Entity(type="trip", name="Стамбул", status="active")
+    db.add(entity)
+    await db.flush()
+
+    old_item = ChecklistItem(
+        entity_id=entity.id, text="[авто] старый пункт", position=1000, status="open"
+    )
+    db.add(old_item)
+    await db.commit()
+
+    mock_fetch.return_value = {"weather": "прохладно", "destination_notes": ""}
+    response = MagicMock()
+    response.choices[0].message.content = "загранпаспорт\nстраховка\nтёплая куртка"
+    mock_client.chat.completions.create = AsyncMock(return_value=response)
+
+    await generate_trip_checklist(
+        {"destination": "Стамбул", "dates": "", "trip_type": "город", "travelers": "один"},
+        db,
+    )
+
+    saved = await db.execute(sa_select(ChecklistItem).where(ChecklistItem.entity_id == entity.id))
+    saved_items = saved.scalars().all()
+    texts = [i.text for i in saved_items]
+    assert "[авто] старый пункт" not in texts
+    assert len([t for t in texts if t.startswith("[авто]")]) == 3
+
+
+# ── ensure_trip_checklist ─────────────────────────────────────────────────────
+
+
+@patch("modules.suggestions._fetch_trip_context")
+@patch("modules.suggestions._client")
+async def test_ensure_trip_checklist_generates_when_empty(
+    mock_client: MagicMock,
+    mock_fetch: AsyncMock,
+    db: AsyncSession,
+) -> None:
+    """No checklist on entity → generates and returns True."""
+    entity = Entity(type="trip", name="Анталья", status="active")
+    db.add(entity)
+    await db.commit()
+
+    mock_fetch.return_value = {"weather": "жарко", "destination_notes": ""}
+    response = MagicMock()
+    response.choices[0].message.content = "загранпаспорт\nстраховка\nкупальник"
+    mock_client.chat.completions.create = AsyncMock(return_value=response)
+
+    result = await ensure_trip_checklist(entity, db)
+
+    assert result is True
+
+
+@patch("modules.suggestions._fetch_trip_context")
+@patch("modules.suggestions._client")
+async def test_ensure_trip_checklist_skips_when_exists(
+    mock_client: MagicMock,
+    mock_fetch: AsyncMock,
+    db: AsyncSession,
+) -> None:
+    """Checklist already exists → returns False without regenerating."""
+    entity = Entity(type="trip", name="Сочи", status="active")
+    db.add(entity)
+    await db.flush()
+
+    existing = ChecklistItem(entity_id=entity.id, text="Взять полотенце", position=0, status="open")
+    db.add(existing)
+    await db.commit()
+
+    result = await ensure_trip_checklist(entity, db)
+
+    assert result is False
+    mock_client.chat.completions.create.assert_not_called()
 
 
 @patch("modules.suggestions._client")

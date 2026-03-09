@@ -51,6 +51,13 @@ async def check_reminders_job() -> None:
             if entity is None or entity.status in ("archived", "closed"):
                 continue
 
+            if entity.type == "trip":
+                from modules.suggestions import ensure_trip_checklist
+
+                checklist_generated = await ensure_trip_checklist(entity, db)
+                if checklist_generated:
+                    logger.info("Proactively generated checklist for trip entity #%d", entity.id)
+
             from modules.suggestions import enrich_reminder
 
             enriched = await enrich_reminder(reminder, entity, db)

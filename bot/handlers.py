@@ -146,6 +146,47 @@ async def _handle_message(message: dict[str, Any], db: AsyncSession) -> None:
 
         intent = detect_intent(text)
 
+        if intent == "checklist_trip":
+            from modules.parser import parse_trip_checklist_request
+            from modules.suggestions import generate_trip_checklist
+
+            trip_params = await parse_trip_checklist_request(text)
+            if not trip_params.get("destination"):
+                await notifications.send_message(
+                    "✈️ Укажи направление и примерные даты.\n"
+                    "Например: «Собери чеклист для поездки в Дубай 20-25 апреля»"
+                )
+                return
+
+            items, entity = await generate_trip_checklist(trip_params, db)
+
+            if not items:
+                await notifications.send_message("❌ Не удалось сгенерировать чеклист.")
+                return
+
+            checklist_text = "\n".join(f"• {item}" for item in items)
+            destination = trip_params.get("destination", "поездки")
+
+            if entity:
+                text_out = (
+                    f"✈️ <b>Чеклист для {destination}</b> · /entity {entity.id}\n\n"
+                    f"{checklist_text}\n\n"
+                    f"📎 Сохранил в чеклист поездки."
+                )
+                await notifications.send_message(text_out)
+            else:
+                text_out = f"✈️ <b>Чеклист для {destination}</b>\n\n{checklist_text}"
+                trip_buttons: list[list[dict[str, str]]] = [
+                    [
+                        {
+                            "text": "✈️ Создать поездку",
+                            "callback_data": f"create_trip_{destination}",
+                        }
+                    ]
+                ]
+                await notifications.send_message(text_out, buttons=trip_buttons)
+            return
+
         if intent == "generate":
             from modules.reference import generate_text
 
@@ -461,6 +502,14 @@ async def _handle_callback(callback_query: dict[str, Any], db: AsyncSession) -> 
 
     elif data == "ref_link_cancel":
         await notifications.send_message("Отмена.")
+
+    elif data.startswith("create_trip_"):
+        destination = data[len("create_trip_") :]
+        await notifications.send_message(
+            f"✈️ Чтобы создать поездку, напиши мне:\n"
+            f"<code>Поездка в {destination}</code>\n"
+            f"— и я создам запись с напоминаниями."
+        )
 
     elif data.startswith("ref_link_"):
         ref_id = int(data.split("_", 2)[2])
