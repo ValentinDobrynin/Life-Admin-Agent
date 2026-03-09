@@ -113,18 +113,24 @@ async def _handle_message(message: dict[str, Any], db: AsyncSession) -> None:
             ref_item = await find_reference_item(text, db)
             if ref_item:
                 data_text = format_ref_data_text(ref_item)
-                if ref_item.r2_key:
+                if ref_item.r2_keys:
                     try:
-                        file_bytes = download_file(ref_item.r2_key)
-                        filename = get_reference_filename(ref_item.r2_key)
-                        caption = data_text if len(data_text) <= 1024 else None
-                        await tg.send_document(
-                            chat_id=settings.telegram_chat_id,
-                            file_bytes=file_bytes,
-                            filename=filename,
-                            caption=caption,
-                        )
-                        if caption is None:
+                        for idx, r2_key in enumerate(ref_item.r2_keys):
+                            file_bytes = download_file(r2_key)
+                            filename = get_reference_filename(r2_key)
+                            # caption only on the first file
+                            caption = (
+                                (data_text if len(data_text) <= 1024 else None)
+                                if idx == 0
+                                else None
+                            )
+                            await tg.send_document(
+                                chat_id=settings.telegram_chat_id,
+                                file_bytes=file_bytes,
+                                filename=filename,
+                                caption=caption,
+                            )
+                        if len(data_text) > 1024:
                             await notifications.send_message(data_text)
                     except Exception:
                         logger.exception("Failed to send reference file")
@@ -219,10 +225,24 @@ async def _handle_photo(message: dict[str, Any], db: AsyncSession) -> None:
     caption: str = message.get("caption", "")
 
     from modules.reference import (
+        append_file_to_reference,
+        extract_reference_append_id,
         get_all_persons,
         is_reference_caption,
         parse_and_save_reference_from_file,
     )
+
+    append_id = extract_reference_append_id(caption)
+    if append_id is not None:
+        updated = await append_file_to_reference(append_id, file_bytes, filename, db)
+        if updated is None:
+            await notifications.send_message(f"❌ Запись справочника #{append_id} не найдена.")
+        else:
+            n = len(updated.r2_keys)
+            await notifications.send_message(
+                f"📎 Добавил страницу к <b>{updated.label}</b> · #{updated.id} (всего файлов: {n})"
+            )
+        return
 
     if is_reference_caption(caption):
         ref_item, entity, auto_linked_person = await parse_and_save_reference_from_file(
@@ -235,7 +255,8 @@ async def _handle_photo(message: dict[str, Any], db: AsyncSession) -> None:
             msg += f"\n📅 Напомню до {entity.end_date.strftime('%d.%m.%Y')} · /entity {entity.id}"
         elif entity:
             msg += f"\n📋 Создал запись без срока · /entity {entity.id}"
-        buttons = None
+        msg += f"\n\n<i>Есть ещё страницы? Отправь с подписью: справочник #{ref_item.id}</i>"
+        buttons: list[list[dict[str, str]]] | None = None
         if ref_item.type != "person" and not auto_linked_person:
             persons = await get_all_persons(db)
             if persons:
@@ -280,10 +301,24 @@ async def _handle_document(message: dict[str, Any], db: AsyncSession) -> None:
     caption: str = message.get("caption", "")
 
     from modules.reference import (
+        append_file_to_reference,
+        extract_reference_append_id,
         get_all_persons,
         is_reference_caption,
         parse_and_save_reference_from_file,
     )
+
+    append_id = extract_reference_append_id(caption)
+    if append_id is not None:
+        updated = await append_file_to_reference(append_id, file_bytes, filename, db)
+        if updated is None:
+            await notifications.send_message(f"❌ Запись справочника #{append_id} не найдена.")
+        else:
+            n = len(updated.r2_keys)
+            await notifications.send_message(
+                f"📎 Добавил страницу к <b>{updated.label}</b> · #{updated.id} (всего файлов: {n})"
+            )
+        return
 
     if is_reference_caption(caption):
         ref_item, entity, auto_linked_person = await parse_and_save_reference_from_file(
@@ -296,11 +331,12 @@ async def _handle_document(message: dict[str, Any], db: AsyncSession) -> None:
             msg += f"\n📅 Напомню до {entity.end_date.strftime('%d.%m.%Y')} · /entity {entity.id}"
         elif entity:
             msg += f"\n📋 Создал запись без срока · /entity {entity.id}"
-        buttons = None
+        msg += f"\n\n<i>Есть ещё страницы? Отправь с подписью: справочник #{ref_item.id}</i>"
+        doc_buttons: list[list[dict[str, str]]] | None = None
         if ref_item.type != "person" and not auto_linked_person:
             persons = await get_all_persons(db)
             if persons:
-                buttons = [
+                doc_buttons = [
                     [
                         {
                             "text": "👤 Привязать к человеку",
@@ -308,7 +344,7 @@ async def _handle_document(message: dict[str, Any], db: AsyncSession) -> None:
                         }
                     ]
                 ]
-        await notifications.send_message(msg, buttons=buttons)
+        await notifications.send_message(msg, buttons=doc_buttons)
         return
 
     entity_id: int | None = None

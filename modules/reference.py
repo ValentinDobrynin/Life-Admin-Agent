@@ -206,7 +206,8 @@ async def get_ref_card_text(ref_id: int, db: AsyncSession) -> str:
             lines.append("\n<b>Документы и имущество:</b>")
             for owned_item in owned:
                 owned_emoji = _TYPE_EMOJI.get(owned_item.type, "📎")
-                suffix = " · 📎" if owned_item.r2_key else ""
+                n_files = len(owned_item.r2_keys)
+                suffix = f" · 📎×{n_files}" if n_files > 1 else (" · 📎" if n_files == 1 else "")
                 lines.append(f"  {owned_emoji} {owned_item.label} · #{owned_item.id}{suffix}")
     elif item.owner_ref_id:
         owner_result = await db.execute(
@@ -460,7 +461,7 @@ async def parse_and_save_reference_from_file(
         type=ref_type,
         label=ref_label,
         data=ref_data,
-        r2_key=r2_key,
+        r2_keys=[r2_key],
         relation=relation if ref_type == "person" else None,
     )
     db.add(ref_item)
@@ -479,11 +480,11 @@ async def parse_and_save_reference_from_file(
     await db.refresh(ref_item)
 
     logger.info(
-        "Saved reference from file id=%d type=%s label=%s r2_key=%s entity_id=%s",
+        "Saved reference from file id=%d type=%s label=%s r2_keys=%s entity_id=%s",
         ref_item.id,
         ref_type,
         ref_label,
-        r2_key,
+        ref_item.r2_keys,
         entity.id if entity else None,
     )
     return ref_item, entity, auto_linked_person
@@ -539,6 +540,50 @@ async def find_reference_item(
 def get_reference_filename(r2_key: str) -> str:
     """Extract original filename from r2_key."""
     return r2_key.split("/")[-1] if "/" in r2_key else r2_key
+
+
+def extract_reference_append_id(caption: str) -> int | None:
+    """Detect 'справочник #<id>' caption pattern for appending a file to existing record.
+
+    Returns reference ID if caption matches, None otherwise.
+    """
+    import re
+
+    stripped = caption.strip().lower()
+    m = re.match(r"^справочник\s+#(\d+)$", stripped)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+async def append_file_to_reference(
+    ref_id: int,
+    file_bytes: bytes,
+    filename: str,
+    db: AsyncSession,
+) -> ReferenceData | None:
+    """Upload a file to R2 and append its key to an existing reference record.
+
+    Returns the updated ReferenceData, or None if the record is not found.
+    """
+    from modules import storage
+
+    result = await db.execute(select(ReferenceData).where(ReferenceData.id == ref_id))
+    item = result.scalar_one_or_none()
+    if item is None:
+        return None
+
+    r2_key = storage.upload_file(file_bytes, filename, prefix="reference")
+    item.r2_keys = [*item.r2_keys, r2_key]
+    await db.commit()
+    await db.refresh(item)
+
+    logger.info(
+        "Appended file to reference #%d, total_files=%d",
+        ref_id,
+        len(item.r2_keys),
+    )
+    return item
 
 
 async def parse_and_save_reference(

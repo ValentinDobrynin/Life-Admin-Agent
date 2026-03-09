@@ -10,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from database import Base
 from modules.parser import is_send_file_request
 from modules.reference import (
+    append_file_to_reference,
+    extract_reference_append_id,
     extract_reference_label,
     find_person_by_relation,
     find_reference_item,
@@ -134,7 +136,7 @@ async def test_parse_and_save_creates_document_entity(db: AsyncSession) -> None:
 
     assert ref_item.type == "document"
     assert ref_item.label == "Водительские права"
-    assert ref_item.r2_key == "reference/abc.jpg"
+    assert ref_item.r2_keys == ["reference/abc.jpg"]
     assert entity is not None
     assert entity.end_date is None
     assert auto_linked is None
@@ -269,7 +271,7 @@ async def test_find_reference_item_no_match(db: AsyncSession) -> None:
 
 async def test_find_reference_item_found_with_file(db: AsyncSession) -> None:
     item = await save_reference_item("document", "Водительские права", {}, db)
-    item.r2_key = "reference/rights.jpg"
+    item.r2_keys = ["reference/rights.jpg"]
     await db.commit()
 
     mock_response = MagicMock()
@@ -284,11 +286,11 @@ async def test_find_reference_item_found_with_file(db: AsyncSession) -> None:
 
     assert result is not None
     assert result.id == item.id
-    assert result.r2_key == "reference/rights.jpg"
+    assert result.r2_keys == ["reference/rights.jpg"]
 
 
 async def test_find_reference_item_found_without_file(db: AsyncSession) -> None:
-    """Items without r2_key are still returned (data shown without file)."""
+    """Items without files are still returned (data shown without file)."""
     item = await save_reference_item("document", "Паспорт РФ", {"series": "45 05"}, db)
 
     mock_response = MagicMock()
@@ -303,7 +305,7 @@ async def test_find_reference_item_found_without_file(db: AsyncSession) -> None:
 
     assert result is not None
     assert result.id == item.id
-    assert result.r2_key is None
+    assert result.r2_keys == []
 
 
 # ── find_person_by_relation ───────────────────────────────────────────────────
@@ -513,3 +515,69 @@ async def test_text_returns_none_on_parse_error(db: AsyncSession) -> None:
         result = await parse_and_save_reference("что-то непонятное", db)
 
     assert result is None
+
+
+# ── extract_reference_append_id ───────────────────────────────────────────────
+
+
+def test_extract_reference_append_id_valid() -> None:
+    """'справочник #11' → 11."""
+    assert extract_reference_append_id("справочник #11") == 11
+    assert extract_reference_append_id("  Справочник #999  ") == 999
+
+
+def test_extract_reference_append_id_invalid() -> None:
+    """Non-matching captions → None."""
+    assert extract_reference_append_id("справочник: права") is None
+    assert extract_reference_append_id("справочник #abc") is None
+    assert extract_reference_append_id("") is None
+    assert extract_reference_append_id("пришли права") is None
+
+
+# ── append_file_to_reference ──────────────────────────────────────────────────
+
+
+async def test_append_file_to_reference_success(db: AsyncSession) -> None:
+    """Appending a file adds its r2_key to r2_keys list."""
+    item = await save_reference_item("document", "Водительские права", {}, db)
+    item.r2_keys = ["reference/page1.jpg"]
+    await db.commit()
+
+    with patch("modules.storage.upload_file", return_value="reference/page2.jpg"):
+        updated = await append_file_to_reference(item.id, b"bytes2", "page2.jpg", db)
+
+    assert updated is not None
+    assert len(updated.r2_keys) == 2
+    assert updated.r2_keys[1] == "reference/page2.jpg"
+
+
+async def test_append_file_to_reference_not_found(db: AsyncSession) -> None:
+    """Returns None when ref_id does not exist."""
+    with patch("modules.storage.upload_file", return_value="reference/page1.jpg"):
+        result = await append_file_to_reference(99999, b"bytes", "page.jpg", db)
+
+    assert result is None
+
+
+async def test_parse_and_save_stores_r2_keys_as_list(db: AsyncSession) -> None:
+    """parse_and_save_reference_from_file stores the file key as a list."""
+    mock_response = MagicMock()
+    mock_response.choices[0].message.content = (
+        '{"type": "document", "label": "Паспорт РФ", "data": {}, "end_date": null}'
+    )
+
+    with (
+        patch("modules.reference._get_client") as mock_client,
+        patch("modules.ingestion.extract_text_from_file", new=AsyncMock(return_value="")),
+        patch("modules.storage.upload_file", return_value="reference/passport.pdf"),
+    ):
+        mock_instance = MagicMock()
+        mock_instance.chat.completions.create = AsyncMock(return_value=mock_response)
+        mock_client.return_value = mock_instance
+
+        ref_item, _, _ = await parse_and_save_reference_from_file(
+            b"bytes", "passport.pdf", "application/pdf", "справочник: паспорт", db
+        )
+
+    assert isinstance(ref_item.r2_keys, list)
+    assert ref_item.r2_keys == ["reference/passport.pdf"]
