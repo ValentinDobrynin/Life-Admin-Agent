@@ -132,6 +132,85 @@ async def test_text_after_edit_callback_calls_process_edit(
     assert handlers._pending_edit_entity_id is None
 
 
+@patch("bot.handlers.notifications.send_message", new_callable=AsyncMock)
+async def test_generate_clarifying_question_sets_pending_state(
+    mock_send: AsyncMock,
+    db_session: AsyncSession,
+) -> None:
+    """If generate_text returns a question, pending state is saved for next message."""
+    import bot.handlers as handlers
+
+    handlers._pending_generate_request = None
+
+    with (
+        patch("modules.parser.detect_intent", return_value="generate"),
+        patch(
+            "modules.reference.generate_text",
+            new=AsyncMock(
+                return_value="У тебя несколько машин, уточни: какую именно использовать?"
+            ),
+        ),
+    ):
+        update = {"message": {"text": "напиши пропуск для машины"}}
+        from bot.handlers import handle_update
+
+        await handle_update(update, db_session)
+
+    assert handlers._pending_generate_request == "напиши пропуск для машины"
+    mock_send.assert_called_once()
+
+
+@patch("bot.handlers.notifications.send_message", new_callable=AsyncMock)
+async def test_generate_no_question_does_not_set_pending_state(
+    mock_send: AsyncMock,
+    db_session: AsyncSession,
+) -> None:
+    """If generate_text returns a final text (no ?), pending state stays None."""
+    import bot.handlers as handlers
+
+    handlers._pending_generate_request = None
+
+    with (
+        patch("modules.parser.detect_intent", return_value="generate"),
+        patch(
+            "modules.reference.generate_text",
+            new=AsyncMock(return_value="Прошу оформить пропуск на Тойота Камри А123БВ777"),
+        ),
+    ):
+        update = {"message": {"text": "напиши пропуск для машины"}}
+        from bot.handlers import handle_update
+
+        await handle_update(update, db_session)
+
+    assert handlers._pending_generate_request is None
+
+
+@patch("bot.handlers.notifications.send_message", new_callable=AsyncMock)
+async def test_clarification_reply_combines_and_calls_generate(
+    mock_send: AsyncMock,
+    db_session: AsyncSession,
+) -> None:
+    """When _pending_generate_request is set, next message is combined and retried."""
+    import bot.handlers as handlers
+
+    handlers._pending_generate_request = "напиши пропуск для машины"
+
+    with patch(
+        "modules.reference.generate_text",
+        new=AsyncMock(return_value="Прошу оформить пропуск на Тойота Камри А123БВ777"),
+    ) as mock_generate:
+        update = {"message": {"text": "Тойота Камри"}}
+        from bot.handlers import handle_update
+
+        await handle_update(update, db_session)
+
+    mock_generate.assert_called_once()
+    combined_arg = mock_generate.call_args[0][0]
+    assert "напиши пропуск для машины" in combined_arg
+    assert "Тойота Камри" in combined_arg
+    assert handlers._pending_generate_request is None
+
+
 @patch("bot.client.get_file", new_callable=AsyncMock)
 @patch("bot.client.download_file", new_callable=AsyncMock)
 @patch("modules.ingestion.process_file", new_callable=AsyncMock)

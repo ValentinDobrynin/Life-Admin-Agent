@@ -15,6 +15,9 @@ logger = logging.getLogger(__name__)
 # Single-user MVP: stores entity_id waiting for edit text from the user.
 _pending_edit_entity_id: int | None = None
 
+# Single-user MVP: stores original generate_text request waiting for user clarification.
+_pending_generate_request: str | None = None
+
 START_MESSAGE = (
     "👋 Привет! Я Life Admin Agent.\n\n"
     "Просто напиши мне что нужно запомнить:\n"
@@ -34,7 +37,7 @@ async def handle_update(update: dict[str, Any], db: AsyncSession = Depends(get_d
 
 
 async def _handle_message(message: dict[str, Any], db: AsyncSession) -> None:
-    global _pending_edit_entity_id
+    global _pending_edit_entity_id, _pending_generate_request
 
     text = message.get("text", "")
 
@@ -96,6 +99,16 @@ async def _handle_message(message: dict[str, Any], db: AsyncSession) -> None:
         entity_id = _pending_edit_entity_id
         _pending_edit_entity_id = None
         await ingestion.process_edit(entity_id, text, db)
+        return
+
+    if text and _pending_generate_request is not None:
+        original_request = _pending_generate_request
+        _pending_generate_request = None
+        from modules.reference import generate_text
+
+        combined = f"{original_request} {text}"
+        result = await generate_text(combined, db)
+        await notifications.send_message(result)
         return
 
     if text:
@@ -213,6 +226,10 @@ async def _handle_message(message: dict[str, Any], db: AsyncSession) -> None:
             from modules.reference import generate_text
 
             result = await generate_text(text, db)
+            # If OpenAI returned a clarifying question — save the original request
+            # so the next user message is appended and retried automatically.
+            if "?" in result:
+                _pending_generate_request = text
             await notifications.send_message(result)
             return
 
