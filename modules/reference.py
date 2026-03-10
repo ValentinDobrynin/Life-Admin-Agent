@@ -24,6 +24,11 @@ def _load_prompt(name: str) -> str:
     return "\n".join(lines).strip()
 
 
+def _load_soul() -> str:
+    """Load agent constitution from soul.txt, stripping metadata comment lines."""
+    return _load_prompt("soul.txt")
+
+
 _TYPE_EMOJI = {
     "person": "👤",
     "car": "🚗",
@@ -289,7 +294,11 @@ async def generate_text(user_request: str, db: AsyncSession) -> str:
         context_parts.append(entry)
     context = "\n".join(context_parts)
 
-    system_prompt = _load_prompt("reference_generate.txt").replace("{context}", context)
+    system_prompt = (
+        _load_soul()
+        + "\n\n---\n\n"
+        + _load_prompt("reference_generate.txt").replace("{context}", context)
+    )
 
     try:
         response = await _get_client().chat.completions.create(

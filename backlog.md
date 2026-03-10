@@ -26,7 +26,7 @@
 
 ### [ARCH-006] Конституция агента: `prompts/soul.txt`
 
-**Статус:** 🆕 To Do
+**Статус:** ✅ Done
 **Приоритет:** High
 **Компонент:** Prompting / Parser
 
@@ -45,6 +45,9 @@
   - поведение при нехватке данных: одно уточнение;
   - поведение при неоднозначности: выбрать наиболее вероятный вариант и сообщить.
 - Подключить чтение `soul.txt` в формирование system prompt в `modules/parser.py` и `modules/reference.py`.
+
+**Resolution**
+Создан `prompts/soul.txt` с разделами: Роль, Тон, Формат, Автономность, При нехватке данных, При неоднозначности. Инжекция реализована методом prepend: `soul + "\n\n---\n\n" + existing_prompt`. Затронуты два вызова: `extract_entity` в `modules/parser.py` (через новый `_load_soul()`) и `generate_text` в `modules/reference.py` (через `_load_soul()` на базе существующего `_load_prompt`). JSON-парсеры не тронуты. Добавлен `tests/test_soul.py` с 4 тестами: существование файла, наличие секций, инжекция в `extract_entity`, инжекция в `generate_text`.
 
 ---
 
@@ -605,7 +608,7 @@ owner_id в entities заложен, но логика одного пользо
 | — | FEATURE-014: Карточки людей + привязка документов | ✅ Done |
 | — | FEATURE-015: Несколько файлов на одну запись справочника | ✅ Done |
 | — | FEATURE-016: Генерация чеклиста вещей для поездки | ✅ Done |
-| — | ARCH-006: Конституция агента `soul.txt` | 🆕 To Do |
+| — | ARCH-006: Конституция агента `soul.txt` | ✅ Done |
 | — | UX-001: State machine для прикрепления файлов | 🆕 To Do |
 | — | UX-004: Редактирование записи справочника | 🆕 To Do |
 | — | UX-005: Dialog state для generate_text | ✅ Done |

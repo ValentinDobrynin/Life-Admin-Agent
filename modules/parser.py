@@ -12,6 +12,7 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 _PROMPT_PATH = Path(__file__).parent.parent / "prompts" / "entity_parser.txt"
+_SOUL_PATH = Path(__file__).parent.parent / "prompts" / "soul.txt"
 
 
 def _get_client() -> AsyncOpenAI:
@@ -20,6 +21,10 @@ def _get_client() -> AsyncOpenAI:
 
 def _load_prompt() -> str:
     return _PROMPT_PATH.read_text(encoding="utf-8")
+
+
+def _load_soul() -> str:
+    return _SOUL_PATH.read_text(encoding="utf-8")
 
 
 class EntityData:
@@ -44,7 +49,7 @@ class EntityData:
 
 async def extract_entity(raw_text: str) -> EntityData:
     """Extract structured entity data from raw user text via OpenAI."""
-    system_prompt = _load_prompt()
+    system_prompt = _load_soul() + "\n\n---\n\n" + _load_prompt()
 
     try:
         response = await _get_client().chat.completions.create(
