@@ -134,6 +134,12 @@ def test_detect_intent_reference_add() -> None:
     assert detect_intent("Добавь в справочник: паспорт РФ") == "reference_add"
 
 
+def test_detect_intent_weather_query() -> None:
+    assert detect_intent("Какая будет погода в Нячанге 11-18 марта?") == "weather_query"
+    assert detect_intent("погода в Дубае в апреле") == "weather_query"
+    assert detect_intent("прогноз погоды на неделю") == "weather_query"
+
+
 def test_detect_intent_entity_default() -> None:
     assert detect_intent("Поездка в Дубай 20 апреля") == "entity"
     assert detect_intent("Страховка истекает 1 июля") == "entity"

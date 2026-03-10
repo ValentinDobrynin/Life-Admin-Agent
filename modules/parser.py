@@ -98,9 +98,23 @@ def detect_intent(text: str) -> str:
         'reference_add'   — user wants to add data to the reference directory
         'generate'        — user wants to generate a text using reference data
         'checklist_trip'  — user wants a packing checklist for a trip
+        'weather_query'   — user asks about weather in a destination
         'entity'          — default: create a life admin entity
     """
     text_lower = text.lower()
+
+    # weather_query — before entity to avoid saving as life admin item
+    weather_triggers = [
+        "какая погода",
+        "какая будет погода",
+        "погода в ",
+        "погода на ",
+        "будет дождь",
+        "температура в ",
+        "прогноз погоды",
+    ]
+    if any(t in text_lower for t in weather_triggers):
+        return "weather_query"
 
     # checklist_trip — must check before entity to avoid misclassification
     checklist_triggers = [

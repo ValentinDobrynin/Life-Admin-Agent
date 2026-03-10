@@ -146,6 +146,28 @@ async def _handle_message(message: dict[str, Any], db: AsyncSession) -> None:
 
         intent = detect_intent(text)
 
+        if intent == "weather_query":
+            from modules.parser import parse_trip_checklist_request
+            from modules.suggestions import _fetch_trip_context
+
+            params = await parse_trip_checklist_request(text)
+            destination = params.get("destination", "")
+            dates = params.get("dates", "")
+            if not destination:
+                await notifications.send_message(
+                    "🌤 Укажи город или страну.\nНапример: «Какая погода в Дубае 20-25 апреля?»"
+                )
+                return
+
+            ctx = await _fetch_trip_context(destination, dates)
+            weather = ctx.get("weather", "нет данных")
+            period = f" ({dates})" if dates else ""
+            await notifications.send_message(
+                f"🌤 <b>Погода в {destination}{period}</b>\n{weather}\n\n"
+                f"<i>Хочешь соберу чеклист вещей для поездки?</i>"
+            )
+            return
+
         if intent == "checklist_trip":
             from modules.parser import parse_trip_checklist_request
             from modules.suggestions import generate_trip_checklist
