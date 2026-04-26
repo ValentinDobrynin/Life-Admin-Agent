@@ -283,6 +283,179 @@ async def test_callback_send_doc(session: AsyncSession) -> None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Tag editing flow via inline buttons
+# ---------------------------------------------------------------------------
+
+
+async def test_callback_tag_edit_sets_state(session: AsyncSession) -> None:
+    p = Person(full_name="Anna", relation="жена")
+    session.add(p)
+    await session.flush()
+    d = Document(
+        kind="passport",
+        title="Паспорт",
+        owner_person_id=p.id,
+        status="active",
+        tags=["паспорт"],
+    )
+    session.add(d)
+    await session.commit()
+
+    captured: list[str] = []
+
+    async def fake_send(chat_id: int, text: str, keyboard: Any = None) -> None:
+        captured.append(text)
+
+    async def fake_edit_markup(*a: Any, **kw: Any) -> None:
+        return None
+
+    with (
+        patch("bot.handlers.notifications.send_text", fake_send),
+        patch("bot.handlers.client.answer_callback_query", AsyncMock()),
+        patch("bot.handlers.client.edit_message_reply_markup", fake_edit_markup),
+    ):
+        await handlers.handle_update(_cb(f"tag_edit_document_{d.id}"), session)
+
+    bs = await state.get_state(session, settings.telegram_chat_id)
+    assert bs is not None
+    assert bs.state == "awaiting_tag_edit"
+    assert bs.context["rtype"] == "document"
+    assert bs.context["rid"] == d.id
+    assert any("Какие теги" in t for t in captured)
+
+
+async def test_text_in_tag_edit_state_updates_tags(session: AsyncSession) -> None:
+    p = Person(full_name="Anna", relation="жена")
+    session.add(p)
+    await session.flush()
+    d = Document(
+        kind="passport",
+        title="Паспорт",
+        owner_person_id=p.id,
+        status="active",
+        tags=["паспорт"],
+    )
+    session.add(d)
+    await session.commit()
+    did = d.id
+
+    await state.set_state(
+        session,
+        settings.telegram_chat_id,
+        "awaiting_tag_edit",
+        {"rtype": "document", "rid": did},
+    )
+
+    captured: list[str] = []
+
+    async def fake_send(chat_id: int, text: str, keyboard: Any = None) -> None:
+        captured.append(text)
+
+    with patch("bot.handlers.notifications.send_text", fake_send):
+        await handlers.handle_update(_msg("+загран +первый"), session)
+
+    refreshed = await session.get(Document, did)
+    assert refreshed is not None
+    assert "загран" in (refreshed.tags or [])
+    assert "первый" in (refreshed.tags or [])
+    assert "паспорт" in (refreshed.tags or [])
+    assert any("Обновил теги" in t for t in captured)
+    bs = await state.get_state(session, settings.telegram_chat_id)
+    assert bs is None
+
+
+# ---------------------------------------------------------------------------
+# Delete confirmation flow
+# ---------------------------------------------------------------------------
+
+
+async def test_callback_del_asks_confirmation(session: AsyncSession) -> None:
+    p = Person(full_name="Anna", relation="жена")
+    session.add(p)
+    await session.flush()
+    d = Document(kind="passport", title="Паспорт", owner_person_id=p.id, status="active")
+    session.add(d)
+    await session.commit()
+
+    captured: list[tuple[str, Any]] = []
+
+    async def fake_send(chat_id: int, text: str, keyboard: Any = None) -> None:
+        captured.append((text, keyboard))
+
+    async def noop(*a: Any, **kw: Any) -> None:
+        return None
+
+    with (
+        patch("bot.handlers.notifications.send_text", fake_send),
+        patch("bot.handlers.client.answer_callback_query", AsyncMock()),
+        patch("bot.handlers.client.edit_message_reply_markup", noop),
+    ):
+        await handlers.handle_update(_cb(f"del_document_{d.id}"), session)
+
+    assert any("Точно удалить" in text for text, _ in captured)
+    confirm_msg = next(((t, k) for t, k in captured if "Точно удалить" in t), None)
+    assert confirm_msg is not None
+    _, keyboard = confirm_msg
+    assert keyboard is not None
+    bs = await state.get_state(session, settings.telegram_chat_id)
+    assert bs is not None and bs.state == "awaiting_delete_confirm"
+
+
+async def test_callback_del_yes_deletes_record(session: AsyncSession) -> None:
+    p = Person(full_name="Anna", relation="жена")
+    session.add(p)
+    await session.flush()
+    d = Document(kind="passport", title="Паспорт", owner_person_id=p.id, status="active")
+    session.add(d)
+    await session.commit()
+    did = d.id
+
+    captured: list[str] = []
+
+    async def fake_send(chat_id: int, text: str, keyboard: Any = None) -> None:
+        captured.append(text)
+
+    async def noop(*a: Any, **kw: Any) -> None:
+        return None
+
+    with (
+        patch("bot.handlers.notifications.send_text", fake_send),
+        patch("bot.handlers.client.answer_callback_query", AsyncMock()),
+        patch("bot.handlers.client.edit_message_reply_markup", noop),
+        patch("bot.handlers.storage.delete_file"),
+    ):
+        await handlers.handle_update(_cb(f"del_yes_document_{did}"), session)
+
+    assert await session.get(Document, did) is None
+    assert any("Удалил" in t for t in captured)
+
+
+async def test_callback_del_no_clears_state(session: AsyncSession) -> None:
+    await state.set_state(
+        session,
+        settings.telegram_chat_id,
+        "awaiting_delete_confirm",
+        {"rtype": "document", "rid": 1},
+    )
+
+    async def fake_send(chat_id: int, text: str, keyboard: Any = None) -> None:
+        return None
+
+    async def noop(*a: Any, **kw: Any) -> None:
+        return None
+
+    with (
+        patch("bot.handlers.notifications.send_text", fake_send),
+        patch("bot.handlers.client.answer_callback_query", AsyncMock()),
+        patch("bot.handlers.client.edit_message_reply_markup", noop),
+    ):
+        await handlers.handle_update(_cb("del_no"), session)
+
+    bs = await state.get_state(session, settings.telegram_chat_id)
+    assert bs is None
+
+
 async def test_files_route_single_photo_starts_more_photos(session: AsyncSession) -> None:
     captured: list[str] = []
 

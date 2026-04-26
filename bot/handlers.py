@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import client
 from config import settings
-from modules import cards, ingest, notifications, search, state, storage
+from modules import cards, ingest, notifications, search, state, storage, tag_edit
 from modules.ingest import FileInput
 
 logger = logging.getLogger(__name__)
@@ -106,7 +106,8 @@ async def handle_update(update: dict[str, Any], db: AsyncSession) -> None:
 _HELP_TEXT = (
     "📦 <b>Хранилище личных данных</b>\n\n"
     "Просто пиши, что хочешь сохранить, или присылай фото/PDF.\n"
-    "Чтобы что-то найти — пиши вопросом: «пришли паспорт жены», «когда истекает страховка».\n\n"
+    "Чтобы что-то найти — пиши вопросом: «пришли паспорт жены», «когда истекает страховка».\n"
+    "Под каждой найденной записью будут кнопки <b>✏️ Теги</b> и <b>🗑 Удалить</b>.\n\n"
     "<b>Команды</b>\n"
     "• /list — что лежит в хранилище\n"
     "• /get <code>type_id</code> — выдать запись по id\n"
@@ -179,6 +180,15 @@ async def _command_delete(chat_id: int, rest: str, db: AsyncSession) -> None:
         await notifications.send_text(chat_id, "Формат: /delete document_42")
         return
     rtype, rid = parsed
+    await _perform_delete(chat_id, rtype, rid, db)
+
+
+async def _perform_delete(
+    chat_id: int,
+    rtype: str,
+    rid: int,
+    db: AsyncSession,
+) -> None:
     rec = await search.get_record(db, rtype, rid)
     if rec is None:
         await notifications.send_text(chat_id, "Не нашёл такую запись.")
@@ -199,7 +209,7 @@ async def _command_delete(chat_id: int, rest: str, db: AsyncSession) -> None:
     if obj is not None:
         await db.delete(obj)
         await db.commit()
-    await notifications.send_text(chat_id, f"🗑 Удалил /{rtype}_{rid}")
+    await notifications.send_text(chat_id, f"🗑 Удалил <code>/{rtype}_{rid}</code>.")
 
 
 def _parse_record_id(s: str) -> tuple[str, int] | None:
@@ -228,11 +238,16 @@ async def _route_text(chat_id: int, text: str, db: AsyncSession) -> None:
         await _deliver_result(chat_id, result)
         return
 
+    if bs is not None and bs.state == "awaiting_tag_edit":
+        await _apply_tag_edit_text(chat_id, text, bs.context, db)
+        return
+
     if bs is not None and bs.state in {
         "awaiting_more_photos",
         "awaiting_ocr_verification",
         "awaiting_dup_resolution",
         "awaiting_retrieve_choice",
+        "awaiting_delete_confirm",
     }:
         await notifications.send_text(
             chat_id,
@@ -345,14 +360,39 @@ async def _send_record(
     files = rec.get("files") or []
     if action == "send_text" or not files:
         await notifications.send_text(chat_id, text)
-        return
-    if action == "send_files":
-        await notifications.send_files(chat_id, files, caption=text)
-        return
-    if files:
+    elif action == "send_files":
         await notifications.send_files(chat_id, files, caption=text)
     else:
-        await notifications.send_text(chat_id, text)
+        await notifications.send_files(chat_id, files, caption=text)
+    await _send_record_actions(chat_id, record_type, int(rec.get("id") or 0))
+
+
+def _record_actions_keyboard(record_type: str, record_id: int) -> dict[str, Any]:
+    return client.make_inline_keyboard(
+        [
+            [
+                {
+                    "text": "✏️ Теги",
+                    "callback_data": f"tag_edit_{record_type}_{record_id}",
+                },
+                {
+                    "text": "🗑 Удалить",
+                    "callback_data": f"del_{record_type}_{record_id}",
+                },
+            ]
+        ]
+    )
+
+
+async def _send_record_actions(chat_id: int, record_type: str, record_id: int) -> None:
+    if record_id <= 0:
+        return
+    keyboard = _record_actions_keyboard(record_type, record_id)
+    await notifications.send_text(
+        chat_id,
+        f"Действия для <code>/{record_type}_{record_id}</code>:",
+        keyboard=keyboard,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -412,6 +452,22 @@ async def callback_router(cb: dict[str, Any], db: AsyncSession) -> None:
         await _strip_buttons(chat_id, message_id, None)
         await _handle_pick(chat_id, data, db)
         return
+    if data.startswith("tag_edit_"):
+        await _strip_buttons(chat_id, message_id, None)
+        await _start_tag_edit(chat_id, data, db)
+        return
+    if data.startswith("del_yes_"):
+        await _strip_buttons(chat_id, message_id, "🗑 Удаляю…")
+        await _confirm_delete(chat_id, data, db)
+        return
+    if data == "del_no":
+        await _strip_buttons(chat_id, message_id, "↩️ Отменил удаление.")
+        await state.clear_state(db, chat_id)
+        return
+    if data.startswith("del_"):
+        await _strip_buttons(chat_id, message_id, None)
+        await _ask_delete_confirm(chat_id, data, db)
+        return
     if data.startswith("send_doc_"):
         try:
             doc_id = int(data.removeprefix("send_doc_"))
@@ -465,6 +521,133 @@ async def _handle_pick(chat_id: int, data: str, db: AsyncSession) -> None:
         await notifications.send_text(chat_id, "Запись не найдена.")
         return
     await _send_record(chat_id, rtype, rec, action=action)
+
+
+# ---------------------------------------------------------------------------
+# Tag editing & deletion via inline buttons
+# ---------------------------------------------------------------------------
+
+
+def _parse_record_callback(prefix: str, data: str) -> tuple[str, int] | None:
+    rest = data.removeprefix(prefix)
+    parts = rest.split("_", 1)
+    if len(parts) != 2:
+        return None
+    rtype = parts[0]
+    if rtype not in {"person", "document", "vehicle", "address", "note"}:
+        return None
+    try:
+        return rtype, int(parts[1])
+    except ValueError:
+        return None
+
+
+_TAG_EDIT_PROMPT = (
+    "✏️ <b>Какие теги?</b>\n\n"
+    "Можно тремя способами:\n"
+    "• «<i>загран, первый, РФ</i>» — заменю весь список\n"
+    "• «<i>+загран +первый</i>» — добавлю к существующим\n"
+    "• «<i>-старый -ненужный</i>» — удалю\n"
+    "• «<i>+загран -старый</i>» — смешанно\n\n"
+    "Текущие теги покажу после изменения. Или пришли /cancel."
+)
+
+
+async def _start_tag_edit(chat_id: int, data: str, db: AsyncSession) -> None:
+    parsed = _parse_record_callback("tag_edit_", data)
+    if parsed is None:
+        await notifications.send_text(chat_id, "Не понял, какую запись править.")
+        return
+    rtype, rid = parsed
+    rec = await search.get_record(db, rtype, rid)
+    if rec is None:
+        await notifications.send_text(chat_id, "Запись пропала.")
+        return
+    current = rec.get("tags") or []
+    current_str = ", ".join(current) if current else "—"
+    await state.set_state(
+        db,
+        chat_id,
+        "awaiting_tag_edit",
+        {"rtype": rtype, "rid": rid},
+    )
+    await notifications.send_text(
+        chat_id,
+        f"<b>Текущие теги</b> <code>/{rtype}_{rid}</code>: {current_str}\n\n" + _TAG_EDIT_PROMPT,
+    )
+
+
+async def _apply_tag_edit_text(
+    chat_id: int,
+    text: str,
+    context: dict[str, Any],
+    db: AsyncSession,
+) -> None:
+    rtype = context.get("rtype")
+    rid = context.get("rid")
+    if not isinstance(rtype, str) or not isinstance(rid, int):
+        await state.clear_state(db, chat_id)
+        await notifications.send_text(chat_id, "Контекст редактирования пропал, начни заново.")
+        return
+
+    from modules.search import _TYPE_TO_MODEL  # type: ignore[attr-defined]
+
+    model = _TYPE_TO_MODEL.get(rtype)
+    if model is None:
+        await state.clear_state(db, chat_id)
+        return
+    obj = await db.get(model, rid)
+    if obj is None:
+        await state.clear_state(db, chat_id)
+        await notifications.send_text(chat_id, "Запись пропала.")
+        return
+
+    current = list(getattr(obj, "tags", None) or [])
+    new_tags = tag_edit.apply_tag_edit(current, text)
+    obj.tags = new_tags
+    await db.commit()
+    await state.clear_state(db, chat_id)
+
+    rendered = ", ".join(new_tags) if new_tags else "—"
+    await notifications.send_text(
+        chat_id,
+        f"✅ Обновил теги <code>/{rtype}_{rid}</code>: {rendered}",
+    )
+
+
+async def _ask_delete_confirm(chat_id: int, data: str, db: AsyncSession) -> None:
+    parsed = _parse_record_callback("del_", data)
+    if parsed is None:
+        return
+    rtype, rid = parsed
+    rec = await search.get_record(db, rtype, rid)
+    if rec is None:
+        await notifications.send_text(chat_id, "Запись пропала.")
+        return
+    title = rec.get("title") or f"{rtype}_{rid}"
+    keyboard = client.make_inline_keyboard(
+        [
+            [
+                {"text": "🗑 Удалить навсегда", "callback_data": f"del_yes_{rtype}_{rid}"},
+                {"text": "↩️ Отмена", "callback_data": "del_no"},
+            ]
+        ]
+    )
+    await state.set_state(db, chat_id, "awaiting_delete_confirm", {"rtype": rtype, "rid": rid})
+    await notifications.send_text(
+        chat_id,
+        f"⚠️ Точно удалить <b>{title}</b> (<code>/{rtype}_{rid}</code>) и все связанные файлы?",
+        keyboard=keyboard,
+    )
+
+
+async def _confirm_delete(chat_id: int, data: str, db: AsyncSession) -> None:
+    parsed = _parse_record_callback("del_yes_", data)
+    if parsed is None:
+        return
+    rtype, rid = parsed
+    await state.clear_state(db, chat_id)
+    await _perform_delete(chat_id, rtype, rid, db)
 
 
 # ---------------------------------------------------------------------------

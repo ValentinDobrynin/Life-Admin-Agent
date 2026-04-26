@@ -14,7 +14,13 @@ _LABELS_PASSPORT: list[tuple[str, str]] = [
     ("issued_at", "Выдан"),
     ("issued_by", "Кем выдан"),
     ("expires_at", "Срок до"),
+    ("country", "Страна"),
 ]
+
+_PASSPORT_TYPE_LABEL: dict[str, str] = {
+    "internal": "Внутренний паспорт",
+    "foreign": "Загранпаспорт",
+}
 
 _LABELS_DRIVER_LICENSE: list[tuple[str, str]] = [
     ("number", "Номер"),
@@ -147,12 +153,25 @@ def _file_summary(files: list[dict[str, Any]]) -> str:
     return "Файлы: " + ", ".join(parts) if parts else "Файлы: —"
 
 
+def _passport_kind_label(fields: dict[str, Any] | None) -> str:
+    """Return a human label for a passport, taking passport_type into account.
+
+    Used both as a default `suggested_title` and for the search index.
+    """
+    pt = (fields or {}).get("passport_type")
+    if pt in _PASSPORT_TYPE_LABEL:
+        return _PASSPORT_TYPE_LABEL[pt]
+    return _KIND_TITLE["passport"]
+
+
 def _draft_title(draft: dict[str, Any]) -> str:
     record_type = draft.get("type") or "note"
     kind = draft.get("kind")
     title = draft.get("suggested_title")
     if title:
         return str(title)
+    if record_type == "document" and kind == "passport":
+        return _passport_kind_label(draft.get("fields"))
     if record_type == "document" and kind in _KIND_TITLE:
         return _KIND_TITLE[kind]
     if record_type == "person":

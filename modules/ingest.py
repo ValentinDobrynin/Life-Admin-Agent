@@ -219,18 +219,88 @@ def _normalise_owner_relation(value: Any) -> str | None:
     return None
 
 
+_ALLOWED_PASSPORT_TYPES: frozenset[str] = frozenset({"internal", "foreign"})
+
+_PASSPORT_TYPE_SYNONYMS: dict[str, str] = {
+    "internal": "internal",
+    "общегражданский": "internal",
+    "внутренний": "internal",
+    "ru_internal": "internal",
+    "domestic": "internal",
+    "foreign": "foreign",
+    "загран": "foreign",
+    "загранпаспорт": "foreign",
+    "international": "foreign",
+    "biometric": "foreign",
+    "ru_foreign": "foreign",
+}
+
+
+def _normalise_passport_type(value: Any) -> str | None:
+    if value is None:
+        return None
+    s = str(value).strip().lower()
+    if not s or s in {"null", "none", "—", "-"}:
+        return None
+    if s in _ALLOWED_PASSPORT_TYPES:
+        return s
+    return _PASSPORT_TYPE_SYNONYMS.get(s)
+
+
+def _detect_passport_type_from_number(raw: Any) -> str | None:
+    """Heuristic: RF internal passport is 4-digit series + 6-digit number
+    (i.e. 10 digits total). RF foreign biometric is 9 digits. Other formats
+    (alphanumeric, 8 digits, etc.) likely foreign too."""
+    if raw is None:
+        return None
+    digits = "".join(ch for ch in str(raw) if ch.isdigit())
+    has_letters = any(ch.isalpha() for ch in str(raw))
+    if has_letters:
+        return "foreign"
+    if len(digits) == 10:
+        return "internal"
+    if len(digits) == 9:
+        return "foreign"
+    return None
+
+
+def _augment_passport_fields(ingest: dict[str, Any]) -> None:
+    """Auto-detect passport_type from series/number when LLM left it empty."""
+    if ingest.get("type") != "document" or ingest.get("kind") != "passport":
+        return
+    fields = ingest.get("fields")
+    if not isinstance(fields, dict):
+        return
+    raw_type = fields.get("passport_type")
+    norm = _normalise_passport_type(raw_type)
+    if norm is None:
+        series = fields.get("series")
+        number = fields.get("number")
+        candidate = f"{series or ''}{number or ''}".strip()
+        norm = _detect_passport_type_from_number(candidate)
+        if norm is not None:
+            logger.info("auto-detected passport_type=%s from number=%r", norm, candidate)
+    fields["passport_type"] = norm
+
+
 def _normalise_ingest(payload: dict[str, Any]) -> dict[str, Any]:
-    """Sanitise an ingest dict in place (and return it). Currently only
-    normalises ``owner_relation``; extend as new typed fields appear."""
+    """Sanitise an ingest dict in place (and return it). Currently:
+
+    * normalises ``owner_relation`` to canonical Russian enum,
+    * normalises ``fields.passport_type`` to ``"internal"|"foreign"|null``,
+    * if passport_type is missing, auto-detects from series/number format.
+    """
     if not isinstance(payload, dict):
         return payload
     ingest = payload.get("ingest") if "ingest" in payload else payload
-    if isinstance(ingest, dict) and "owner_relation" in ingest:
-        before = ingest.get("owner_relation")
-        after = _normalise_owner_relation(before)
-        if before != after:
-            logger.info("normalised owner_relation: %r -> %r", before, after)
-        ingest["owner_relation"] = after
+    if isinstance(ingest, dict):
+        if "owner_relation" in ingest:
+            before = ingest.get("owner_relation")
+            after = _normalise_owner_relation(before)
+            if before != after:
+                logger.info("normalised owner_relation: %r -> %r", before, after)
+            ingest["owner_relation"] = after
+        _augment_passport_fields(ingest)
     return payload
 
 

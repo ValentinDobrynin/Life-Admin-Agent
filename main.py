@@ -22,6 +22,11 @@ _SEEN_CAPACITY = 1024
 _seen_update_ids: deque[int] = deque(maxlen=_SEEN_CAPACITY)
 _seen_set: set[int] = set()
 
+_STARTUP_GREETING = (
+    "🟢 <b>Снова на связи.</b>\n\n"
+    "Хранилище подняли, очередь в порядке. Продолжаем складывать и доставать."
+)
+
 # Background tasks created from the webhook handler. We hold strong refs so
 # the loop doesn't garbage-collect them mid-flight (asyncio.create_task only
 # stores a weak reference).
@@ -45,6 +50,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             logger.info("Telegram webhook registered: %s", webhook_url)
         except Exception:
             logger.exception("Failed to register Telegram webhook")
+
+    # Send a startup ping so the user knows the bot is back online after a
+    # deploy / restart. Best-effort — never block startup if Telegram is down.
+    try:
+        from modules import notifications
+
+        await notifications.send_text(settings.telegram_chat_id, _STARTUP_GREETING)
+    except Exception:
+        logger.exception("startup greeting failed")
 
     yield
 

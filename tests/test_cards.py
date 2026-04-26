@@ -64,6 +64,29 @@ def test_render_record_card_document() -> None:
     assert "/document_17" in text
 
 
+def test_render_verification_card_uses_passport_type_in_title() -> None:
+    """If suggested_title is missing, title should reflect passport_type."""
+    draft_foreign = {
+        "type": "document",
+        "kind": "passport",
+        "fields": {"number": "758911941", "passport_type": "foreign"},
+        "tags": [],
+        "files": [],
+    }
+    text = cards.render_verification_card(draft_foreign)
+    assert "Загранпаспорт" in text
+
+    draft_internal = {
+        "type": "document",
+        "kind": "passport",
+        "fields": {"series": "4514", "number": "123456", "passport_type": "internal"},
+        "tags": [],
+        "files": [],
+    }
+    text2 = cards.render_verification_card(draft_internal)
+    assert "Внутренний паспорт" in text2
+
+
 def test_html_escape() -> None:
     draft = {
         "type": "person",

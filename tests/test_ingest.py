@@ -450,3 +450,81 @@ def test_normalise_ingest_fixes_owner_relation_in_payload() -> None:
     }
     out = ingest._normalise_ingest(payload)
     assert out["ingest"]["owner_relation"] == "я"
+
+
+# ---------------------------------------------------------------------------
+# passport_type normalisation + auto-detect
+# ---------------------------------------------------------------------------
+
+
+def test_normalise_passport_type_canonical() -> None:
+    assert ingest._normalise_passport_type("internal") == "internal"
+    assert ingest._normalise_passport_type("FOREIGN") == "foreign"
+    assert ingest._normalise_passport_type(None) is None
+    assert ingest._normalise_passport_type("") is None
+    assert ingest._normalise_passport_type("garbage") is None
+
+
+def test_normalise_passport_type_synonyms() -> None:
+    assert ingest._normalise_passport_type("загран") == "foreign"
+    assert ingest._normalise_passport_type("загранпаспорт") == "foreign"
+    assert ingest._normalise_passport_type("общегражданский") == "internal"
+    assert ingest._normalise_passport_type("внутренний") == "internal"
+
+
+def test_detect_passport_type_internal_when_10_digits() -> None:
+    assert ingest._detect_passport_type_from_number("4514 123456") == "internal"
+    assert ingest._detect_passport_type_from_number("4514123456") == "internal"
+
+
+def test_detect_passport_type_foreign_when_9_digits_or_alpha() -> None:
+    assert ingest._detect_passport_type_from_number("758911941") == "foreign"
+    assert ingest._detect_passport_type_from_number("GA121835") == "foreign"
+
+
+def test_normalise_ingest_autodetects_passport_type_internal() -> None:
+    payload = {
+        "intent": "ingest",
+        "ingest": {
+            "type": "document",
+            "kind": "passport",
+            "owner_relation": "я",
+            "fields": {"series": "4514", "number": "123456"},
+            "tags": ["паспорт"],
+            "suggested_title": "Паспорт",
+        },
+    }
+    out = ingest._normalise_ingest(payload)
+    assert out["ingest"]["fields"]["passport_type"] == "internal"
+
+
+def test_normalise_ingest_autodetects_passport_type_foreign() -> None:
+    payload = {
+        "intent": "ingest",
+        "ingest": {
+            "type": "document",
+            "kind": "passport",
+            "owner_relation": "я",
+            "fields": {"number": "758911941"},
+            "tags": ["паспорт"],
+            "suggested_title": "Паспорт",
+        },
+    }
+    out = ingest._normalise_ingest(payload)
+    assert out["ingest"]["fields"]["passport_type"] == "foreign"
+
+
+def test_normalise_ingest_passport_type_synonym_input() -> None:
+    payload = {
+        "intent": "ingest",
+        "ingest": {
+            "type": "document",
+            "kind": "passport",
+            "owner_relation": "я",
+            "fields": {"number": "0000", "passport_type": "загран"},
+            "tags": ["паспорт"],
+            "suggested_title": "Паспорт",
+        },
+    }
+    out = ingest._normalise_ingest(payload)
+    assert out["ingest"]["fields"]["passport_type"] == "foreign"

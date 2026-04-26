@@ -33,8 +33,8 @@
 
 ## Поля для каждого типа
 
-- **passport**: series, number, full_name, birthday, issued_at, issued_by, expires_at
-- **driver_license**: number, full_name, birthday, categories, issued_at, expires_at
+- **passport**: series, number, full_name, birthday, issued_at, issued_by, expires_at, country, **passport_type** ("internal" | "foreign")
+- **driver_license**: number, full_name, birthday, categories, issued_at, expires_at, country
 - **insurance**: policy_number, company, insured_name, valid_from, valid_until, vehicle_plate
 - **visa**: country, number, type, valid_from, valid_until
 - **certificate / contract / snils / inn / medical / other**: number, issued_by, issued_at, expires_at, plus relevant freeform
@@ -42,6 +42,15 @@
 - **person**: phone, email, telegram, notes
 - **address**: country, city, street, building, apartment, postcode
 - **note**: подходящие из контекста
+
+## passport_type — обязательно для документов kind=passport
+
+Один пользователь может хранить несколько паспортов (внутренний РФ + один или несколько загранов + иностранные). Различай:
+
+- `"internal"` — общегражданский паспорт РФ. Признаки: серия из **4 цифр** + номер из **6 цифр**, страна Россия, формат «12 34 567890».
+- `"foreign"` — заграничный (загранпаспорт) РФ или любой иностранный паспорт. Признаки: номер 9 цифр без серии (РФ загран биометрический/старый), либо буквенно-цифровой (иностранные).
+
+Если непонятно — оставь `null`.
 
 ## Поле owner
 
@@ -53,13 +62,18 @@
 
 В `tags` всегда включай:
 - `kind` на русском И на английском (например, для passport: `["паспорт", "passport"]`).
-- любые семантически значимые ярлыки которые помогут найти запись потом.
+- Уточнения подтипа: для passport_type=foreign добавь `["загран", "загранпаспорт", "foreign"]`; для internal — `["внутренний", "общегражданский"]`.
+- Страна (`["РФ", "Россия"]` или `["Гренада", "Grenada"]` и т.п.), если она различима из OCR/контекста.
+- Если пользователь в caption упомянул порядковый номер («первый», «второй», «старый», «новый») — обязательно положи это в tags как есть.
+- Любые семантически значимые ярлыки которые помогут найти запись потом.
 
 ## suggested_title
 
-Короткое (до 60 символов) человеческое имя для записи. Примеры:
-- "Паспорт РФ" — для своего паспорта
-- "Паспорт жены — основные страницы" — если в caption указано "основные страницы"
+Короткое (до 60 символов) человеческое имя для записи. Должно быть **различимым**, если у одного владельца может быть несколько похожих документов. Примеры:
+- "Внутренний паспорт РФ" — общегражданский паспорт пользователя
+- "Загранпаспорт РФ — Иванов" — заграничный паспорт РФ
+- "Загранпаспорт Гренада — Иванов" — иностранный паспорт
+- "Паспорт жены (основные страницы)" — если в caption явно сказано
 - "Toyota Camry A123BC" — для машины
 - "Саша Балахнин" — для человека
 

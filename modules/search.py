@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -106,6 +107,26 @@ async def _person_lookup(db: AsyncSession) -> dict[int, Person]:
     return {p.id: p for p in result.scalars().all()}
 
 
+def _compute_document_ordinals(docs: Sequence[Document]) -> dict[int, int]:
+    """For each (kind, owner_person_id, passport_type) bucket, assign 1..N ordered
+    by issued_at ascending (None last). 1 = oldest = "первый".
+    """
+    buckets: dict[tuple[str | None, int | None, str | None], list[Document]] = {}
+    for d in docs:
+        passport_type = (d.fields or {}).get("passport_type") if d.kind == "passport" else None
+        key = (d.kind, d.owner_person_id, passport_type)
+        buckets.setdefault(key, []).append(d)
+
+    ordinals: dict[int, int] = {}
+    for bucket_docs in buckets.values():
+        bucket_docs.sort(
+            key=lambda x: (x.issued_at is None, x.issued_at or 0, x.id),
+        )
+        for i, d in enumerate(bucket_docs, start=1):
+            ordinals[d.id] = i
+    return ordinals
+
+
 async def build_index(db: AsyncSession) -> list[dict[str, Any]]:
     """Build a compact index of all active records for retrieval LLM."""
     persons = await _person_lookup(db)
@@ -134,8 +155,10 @@ async def build_index(db: AsyncSession) -> list[dict[str, Any]]:
         .scalars()
         .all()
     )
+    ordinals = _compute_document_ordinals(docs)
     for d in docs:
         owner = persons.get(d.owner_person_id) if d.owner_person_id else None
+        fields = d.fields or {}
         index.append(
             {
                 "type": "document",
@@ -146,6 +169,10 @@ async def build_index(db: AsyncSession) -> list[dict[str, Any]]:
                 "owner_full_name": owner.full_name if owner else None,
                 "tags": d.tags or [],
                 "summary": _summary_document(d),
+                "passport_type": fields.get("passport_type") if d.kind == "passport" else None,
+                "country": fields.get("country"),
+                "ordinal": ordinals.get(d.id),
+                "issued_at": d.issued_at.isoformat() if d.issued_at else None,
             }
         )
 

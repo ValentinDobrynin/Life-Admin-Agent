@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -108,3 +109,81 @@ async def test_get_record_returns_dict(session: AsyncSession) -> None:
 async def test_get_record_invalid_type(session: AsyncSession) -> None:
     rec = await search.get_record(session, "unknown_type", 1)
     assert rec is None
+
+
+async def test_build_index_assigns_ordinals_and_passport_type(session: AsyncSession) -> None:
+    p = Person(full_name="Иван", relation="я")
+    session.add(p)
+    await session.flush()
+
+    older = Document(
+        kind="passport",
+        title="Загран старый",
+        owner_person_id=p.id,
+        status="active",
+        issued_at=date(2018, 8, 14),
+        fields={"passport_type": "foreign"},
+    )
+    newer = Document(
+        kind="passport",
+        title="Загран новый",
+        owner_person_id=p.id,
+        status="active",
+        issued_at=date(2024, 8, 30),
+        fields={"passport_type": "foreign"},
+    )
+    internal = Document(
+        kind="passport",
+        title="Внутренний",
+        owner_person_id=p.id,
+        status="active",
+        issued_at=date(2003, 8, 25),
+        fields={"passport_type": "internal"},
+    )
+    session.add_all([older, newer, internal])
+    await session.commit()
+
+    index = await search.build_index(session)
+    by_title = {item["title"]: item for item in index if item["type"] == "document"}
+
+    assert by_title["Загран старый"]["ordinal"] == 1
+    assert by_title["Загран новый"]["ordinal"] == 2
+    assert by_title["Внутренний"]["ordinal"] == 1
+
+    assert by_title["Загран старый"]["passport_type"] == "foreign"
+    assert by_title["Внутренний"]["passport_type"] == "internal"
+
+
+async def test_compute_document_ordinals_handles_missing_dates() -> None:
+    """Records with no issued_at should still be ordered, and the bucket key
+    should separate (kind, owner, passport_type) properly."""
+    docs = [
+        Document(
+            id=1,
+            kind="passport",
+            title="A",
+            owner_person_id=1,
+            issued_at=None,
+            fields={"passport_type": "foreign"},
+        ),
+        Document(
+            id=2,
+            kind="passport",
+            title="B",
+            owner_person_id=1,
+            issued_at=date(2020, 1, 1),
+            fields={"passport_type": "foreign"},
+        ),
+        Document(
+            id=3,
+            kind="passport",
+            title="C",
+            owner_person_id=2,
+            issued_at=date(2019, 1, 1),
+            fields={"passport_type": "foreign"},
+        ),
+    ]
+    out = search._compute_document_ordinals(docs)
+    assert out[2] == 1  # earlier dated wins for owner 1
+    assert out[1] == 2  # None comes after dated
+    assert out[3] == 1  # different owner — own bucket

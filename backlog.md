@@ -98,6 +98,97 @@
 
 ## ✅ Done
 
+### [FEATURE-110] Различимость документов одного типа: passport_type, ordinal, обогащение тегов
+
+**Status:** ✅ Done
+**Priority:** High
+**Component:** `prompts/classify.txt`, `prompts/patch.txt`, `prompts/retrieve.txt`, `modules/ingest.py`, `modules/cards.py`, `modules/search.py`
+
+**Problem Description**
+После загрузки внутреннего и заграничного паспортов запрос «пришли мне первый загран мой» возвращал чужой паспорт (Гренада). Причины:
+
+1. `kind=passport` без подтипа — LLM не знал, что это два разных документа.
+2. `tags` и `suggested_title` не обогащались уточнениями из правки пользователя («это мой первый загран» → ничего не попало в теги/заголовок).
+3. В индексе ретрива не было порядкового номера, чтобы понять «первый» / «второй».
+
+**Expected Behavior**
+- У `document.fields.passport_type` — явный enum `internal | foreign` (или `null`).
+- Авто-детект по формату номера: 10 цифр → `internal`, 9 цифр / буквенно-цифровой → `foreign`.
+- Заголовок «Внутренний паспорт» / «Загранпаспорт» автоматически, если LLM не дал суггестию.
+- Промпт `patch.txt` добавляет ключевые слова из правки в `tags` и `suggested_title`.
+- В `build_index` для каждого `(kind, owner, passport_type)` присваивается `ordinal` 1..N по `issued_at`. Промпт `retrieve.txt` учит «первый/второй/новый/старый».
+
+**Resolution**
+- `prompts/classify.txt`: добавлены поля `passport_type`, `country` для passport; правила обогащения `tags` (`загран/внутренний/страна/порядковый`) и `suggested_title` (различимый, если у владельца несколько похожих).
+- `prompts/patch.txt`: явные allowed values для `passport_type`; правила «обязательно дополнять `tags` и `suggested_title` ключами «загран/внутренний/первый/...»»; пример обогащения.
+- `prompts/retrieve.txt`: расширены поля индекса (`passport_type`, `country`, `ordinal`, `issued_at`); правила фильтрации по подтипу и порядковым словам.
+- `modules/ingest.py`: `_normalise_passport_type`, `_detect_passport_type_from_number` (10 цифр / 9 цифр / альфа), `_augment_passport_fields` — авто-детект если LLM оставил `null`. Подключены к `_normalise_ingest`.
+- `modules/cards.py`: `_passport_kind_label` подменяет дефолтный заголовок «Паспорт» на «Внутренний/Загранпаспорт» если `passport_type` известен; в карточке добавлено поле «Страна».
+- `modules/search.py`: `_compute_document_ordinals` — для каждого `(kind, owner, passport_type)` сортирует по `issued_at` (None в конце) и проставляет 1..N. Поля индекса расширены.
+
+**Acceptance Criteria**
+- [x] `passport_type` валидируется и нормализуется (русские синонимы → канон).
+- [x] Авто-детект работает для 10 цифр / 9 цифр / альфа-номеров.
+- [x] Заголовок и теги отражают подтип паспорта.
+- [x] В индексе ретрива у каждого документа есть `ordinal` относительно своей корзины.
+- [x] `make check` зелёный.
+
+---
+
+### [FEATURE-111] Редактирование тегов через инлайн-кнопку и удаление с подтверждением
+
+**Status:** ✅ Done
+**Priority:** High
+**Component:** `bot/handlers.py`, `modules/tag_edit.py`
+
+**Problem Description**
+До этого изменить теги уже сохранённой записи можно было только пересоздав её. Удаление было только через `/delete <id>` без подтверждения — рискованно, легко промахнуться.
+
+**Expected Behavior**
+- Под каждой выдачей записи (в ответ на `/get` или поисковый запрос) — две инлайн-кнопки: «✏️ Теги» и «🗑 Удалить».
+- «Теги» открывает диалог: пользователь пишет фразу, бот применяет:
+  - «загран, первый» — заменить весь список,
+  - «+загран +первый» — добавить,
+  - «-старый» — удалить,
+  - «+загран -старый, новый» — смешанно.
+- «Удалить» спрашивает подтверждение (Удалить навсегда / Отмена).
+
+**Resolution**
+- Новый модуль `modules/tag_edit.py` с чистой `apply_tag_edit(current, phrase)` — детектирует наличие маркеров `+`/`-` и переключает режим (replace vs additive). Дедупликация case-insensitive с сохранением порядка.
+- `bot/handlers.py`:
+  - `_send_record` после карточки шлёт мини-сообщение «Действия для /document_3:» с парой кнопок.
+  - Колбэки: `tag_edit_<rtype>_<id>` → `awaiting_tag_edit` state с контекстом, инструкция пользователю; `del_<rtype>_<id>` → подтверждение; `del_yes_<rtype>_<id>` → реально удаляет (общая `_perform_delete`); `del_no` → отмена.
+  - `_route_text`: новый branch для `awaiting_tag_edit` — берёт фразу, прогоняет через `apply_tag_edit`, коммитит, чистит state.
+- 9 unit-тестов на `apply_tag_edit` (replace, +/-/mixed, dedup, юникодные дефисы) и 4 интеграционных теста на handlers (callback tag_edit, текст в state, del confirmation, del_yes, del_no).
+
+**Acceptance Criteria**
+- [x] `apply_tag_edit` корректно обрабатывает 4 режима + дедуп.
+- [x] Кнопки появляются под каждой выдачей записи.
+- [x] Удаление требует подтверждения (двух тапов).
+- [x] Все колбэки сразу убирают клавиатуру с сообщения (визуальный отклик).
+- [x] `make check` зелёный.
+
+---
+
+### [UX-103] Приветственное сообщение при старте/рестарте бота
+
+**Status:** ✅ Done
+**Priority:** Low
+**Component:** `main.py`
+
+**Problem Description**
+После деплоя/рестарта пользователь не понимает, жив ли бот, пока не отправит первое сообщение.
+
+**Resolution**
+- В `lifespan` после `set_webhook` отправляется best-effort приветствие в `settings.telegram_chat_id`. Текст: «🟢 Снова на связи. Хранилище подняли, очередь в порядке…».
+- Любые ошибки отправки логируются и не блокируют старт.
+
+**Acceptance Criteria**
+- [x] При деплое в чате появляется одно сообщение «🟢 Снова на связи».
+- [x] Падение Telegram API не валит запуск приложения.
+
+---
+
 ### [BUG-001] LLM возвращал `owner_relation="self"` — карточка и индекс ломались
 
 **Status:** ✅ Done
