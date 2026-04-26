@@ -98,6 +98,23 @@
 
 ## ✅ Done
 
+### [OPS-001] Починить деплой на Render: мост со старой alembic-цепочкой
+
+**Status:** ✅ Done
+**Priority:** High
+**Component:** `migrations/versions/`
+
+**Problem Description**
+После полной перестройки (коммит `facc926`) первый деплой на Render упал на этапе `alembic upgrade head` с ошибкой `Can't locate revision identified by '6c9d2e3f4a5b'`. В существующей prod-БД `alembic_version = '6c9d2e3f4a5b'` (последняя миграция старого чейна `r2_key_to_r2_keys_in_reference_data`), а в новой репе её больше нет — есть только `0001_initial` без `down_revision`. Alembic не мог соединить точки и падал до выполнения миграций.
+
+**Resolution**
+- Добавлен no-op stub `migrations/versions/6c9d2e3f4a5b_legacy_terminus.py` с `revision = '6c9d2e3f4a5b', down_revision = None`. Существует только для того, чтобы alembic мог разрешить старый id.
+- `0001_initial.py` теперь имеет `down_revision = '6c9d2e3f4a5b'` и в начале `upgrade()` делает `DROP TABLE IF EXISTS ... CASCADE` для всех старых таблиц (`event_log`, `checklist_item`, `reminder`, `contact`, `resource`, `reference_data`, `entity`).
+- Свежая БД: stub проходит вхолостую → `0001_initial` ничего не дропает (IF EXISTS) и создаёт новую схему. Существующая БД: stub не двигает данные → `0001_initial` сносит старые таблицы и создаёт новые.
+- Проверено: `alembic history --verbose` показывает корректную линейную цепочку, `make check` зелёный.
+
+---
+
 ### [ARCH-008] Зачистка: удалить устаревшие подсистемы
 
 **Status:** ✅ Done

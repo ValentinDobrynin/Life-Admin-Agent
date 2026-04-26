@@ -1,7 +1,12 @@
-"""initial schema
+"""initial schema for the rebuilt service
+
+Drops every table from the previous (pre-rebuild) chain if present and
+creates the new typed schema. Chained after the legacy terminus stub
+``6c9d2e3f4a5b`` so existing Render databases can upgrade in place
+without a manual reset.
 
 Revision ID: 0001_initial
-Revises:
+Revises: 6c9d2e3f4a5b
 Create Date: 2026-04-26
 """
 
@@ -11,12 +16,26 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "0001_initial"
-down_revision = None
+down_revision = "6c9d2e3f4a5b"
 branch_labels = None
 depends_on = None
 
 
+_LEGACY_TABLES = (
+    "event_log",
+    "checklist_item",
+    "reminder",
+    "contact",
+    "resource",
+    "reference_data",
+    "entity",
+)
+
+
 def upgrade() -> None:
+    for table in _LEGACY_TABLES:
+        op.execute(f'DROP TABLE IF EXISTS "{table}" CASCADE')
+
     op.create_table(
         "person",
         sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
