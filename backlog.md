@@ -98,6 +98,32 @@
 
 ## ✅ Done
 
+### [BUG-001] LLM возвращал `owner_relation="self"` — карточка и индекс ломались
+
+**Status:** ✅ Done
+**Priority:** Medium
+**Component:** `prompts/patch.txt`, `modules/ingest.py`
+
+**Problem Description**
+После загрузки паспорта пользователь нажал «✏️ Исправить» и написал «это мой русский паспорт». LLM в `patch.txt` обновил `owner_relation` на `"self"` (английский синоним). Карточка отрисовала «Владелец: self (Добрынин Валентин Самсонович)»; если бы пользователь подтвердил — в БД ушло бы `relation="self"`, а потом запрос «пришли мой паспорт» через `retrieve.txt` не сматчил бы его (в индексе `я / жена / муж / …`).
+
+**Expected Behavior**
+`owner_relation` всегда нормализован к каноническому набору `я · жена · муж · сын · дочь · мама · папа · брат · сестра · друг · коллега · иное` (или `null`). Любые `self/me/my/wife/mom/...` маппятся на русский эквивалент.
+
+**Resolution**
+- `prompts/patch.txt`: явный список разрешённых значений `owner_relation` и `kind` + указание LLM нормализовать английские/разговорные варианты к русским.
+- `modules/ingest.py`: добавлены `_ALLOWED_RELATIONS`, `_RELATION_SYNONYMS`, `_normalise_owner_relation`, `_normalise_ingest`. Применяются после `_classify` и `_patch` — программная страховка от любых LLM-косяков. Невалидные значения превращаются в `null` с лог-варнингом.
+- `tests/test_ingest.py`: 4 теста на нормализацию (canonical / synonyms / unknown / payload).
+
+**Acceptance Criteria**
+- [x] `self / me / my` → `я` (канон).
+- [x] `wife / mom / brother / colleague` → русский эквивалент.
+- [x] Неизвестное значение → `null`.
+- [x] И classify, и patch проходят через нормализацию.
+- [x] `make check` зелёный (66 тестов).
+
+---
+
 ### [OPS-003] Кнопки на верификационной карточке не давали отклика
 
 **Status:** ✅ Done

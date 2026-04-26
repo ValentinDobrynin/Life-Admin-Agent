@@ -405,3 +405,48 @@ async def test_detect_intent_text_ingest(session: AsyncSession) -> None:
     with patch("modules.ingest._classify", _stub_classify(payload)):
         intent, _ = await ingest.detect_intent_text("Саша Балахнин это друг", session)
     assert intent == "ingest"
+
+
+# ---------------------------------------------------------------------------
+# owner_relation normalisation
+# ---------------------------------------------------------------------------
+
+
+def test_normalise_owner_relation_canonical() -> None:
+    assert ingest._normalise_owner_relation("я") == "я"
+    assert ingest._normalise_owner_relation("ЖЕНА") == "жена"
+    assert ingest._normalise_owner_relation("друг") == "друг"
+
+
+def test_normalise_owner_relation_synonyms() -> None:
+    assert ingest._normalise_owner_relation("self") == "я"
+    assert ingest._normalise_owner_relation("Me") == "я"
+    assert ingest._normalise_owner_relation("мой") == "я"
+    assert ingest._normalise_owner_relation("wife") == "жена"
+    assert ingest._normalise_owner_relation("Mom") == "мама"
+    assert ingest._normalise_owner_relation("brother") == "брат"
+    assert ingest._normalise_owner_relation("colleague") == "коллега"
+
+
+def test_normalise_owner_relation_unknown_returns_none() -> None:
+    assert ingest._normalise_owner_relation("foobar") is None
+    assert ingest._normalise_owner_relation("") is None
+    assert ingest._normalise_owner_relation(None) is None
+    assert ingest._normalise_owner_relation("null") is None
+
+
+def test_normalise_ingest_fixes_owner_relation_in_payload() -> None:
+    payload = {
+        "intent": "ingest",
+        "ingest": {
+            "type": "document",
+            "kind": "passport",
+            "owner_relation": "self",
+            "owner_full_name": "Иван Иванов",
+            "fields": {},
+            "tags": ["паспорт"],
+            "suggested_title": "Паспорт",
+        },
+    }
+    out = ingest._normalise_ingest(payload)
+    assert out["ingest"]["owner_relation"] == "я"

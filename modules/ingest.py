@@ -109,10 +109,11 @@ async def _classify(text: str, ocr_text: str, db: AsyncSession) -> dict[str, Any
     )
     content = resp.choices[0].message.content or "{}"
     try:
-        return cast(dict[str, Any], json.loads(content))
+        parsed = cast(dict[str, Any], json.loads(content))
     except json.JSONDecodeError:
         logger.exception("classify returned non-JSON: %s", content[:200])
         return {"intent": "query", "ingest": None, "query": text}
+    return _normalise_ingest(parsed)
 
 
 async def _patch(draft: dict[str, Any], phrase: str) -> dict[str, Any]:
@@ -132,15 +133,105 @@ async def _patch(draft: dict[str, Any], phrase: str) -> dict[str, Any]:
     )
     content = resp.choices[0].message.content or "{}"
     try:
-        return cast(dict[str, Any], json.loads(content))
+        patched = cast(dict[str, Any], json.loads(content))
     except json.JSONDecodeError:
         logger.exception("patch returned non-JSON: %s", content[:200])
         return draft
+    return _normalise_ingest(patched)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+_ALLOWED_RELATIONS: frozenset[str] = frozenset(
+    {"я", "жена", "муж", "сын", "дочь", "мама", "папа", "брат", "сестра", "друг", "коллега", "иное"}
+)
+
+# LLM occasionally returns English/colloquial labels for owner_relation
+# (e.g. "self", "me", "wife", "mom"). We normalise to the canonical Russian
+# enum used everywhere in the system, otherwise the verification card looks
+# wrong and the search index gets garbage values.
+_RELATION_SYNONYMS: dict[str, str] = {
+    "я": "я",
+    "мой": "я",
+    "моё": "я",
+    "мое": "я",
+    "моя": "я",
+    "мои": "я",
+    "себя": "я",
+    "self": "я",
+    "me": "я",
+    "i": "я",
+    "my": "я",
+    "myself": "я",
+    "owner": "я",
+    "жена": "жена",
+    "супруга": "жена",
+    "wife": "жена",
+    "муж": "муж",
+    "супруг": "муж",
+    "husband": "муж",
+    "сын": "сын",
+    "son": "сын",
+    "дочь": "дочь",
+    "дочка": "дочь",
+    "daughter": "дочь",
+    "мама": "мама",
+    "мать": "мама",
+    "mom": "мама",
+    "mum": "мама",
+    "mother": "мама",
+    "папа": "папа",
+    "отец": "папа",
+    "dad": "папа",
+    "father": "папа",
+    "брат": "брат",
+    "brother": "брат",
+    "сестра": "сестра",
+    "sister": "сестра",
+    "друг": "друг",
+    "подруга": "друг",
+    "friend": "друг",
+    "коллега": "коллега",
+    "colleague": "коллега",
+    "coworker": "коллега",
+    "иное": "иное",
+    "other": "иное",
+}
+
+
+def _normalise_owner_relation(value: Any) -> str | None:
+    """Map free-form/English owner_relation to the canonical Russian enum.
+
+    Returns the canonical value, or ``None`` if the value is unknown or empty.
+    """
+    if value is None:
+        return None
+    s = str(value).strip().lower()
+    if not s or s in {"null", "none", "—", "-"}:
+        return None
+    if s in _ALLOWED_RELATIONS:
+        return s
+    if s in _RELATION_SYNONYMS:
+        return _RELATION_SYNONYMS[s]
+    return None
+
+
+def _normalise_ingest(payload: dict[str, Any]) -> dict[str, Any]:
+    """Sanitise an ingest dict in place (and return it). Currently only
+    normalises ``owner_relation``; extend as new typed fields appear."""
+    if not isinstance(payload, dict):
+        return payload
+    ingest = payload.get("ingest") if "ingest" in payload else payload
+    if isinstance(ingest, dict) and "owner_relation" in ingest:
+        before = ingest.get("owner_relation")
+        after = _normalise_owner_relation(before)
+        if before != after:
+            logger.info("normalised owner_relation: %r -> %r", before, after)
+        ingest["owner_relation"] = after
+    return payload
 
 
 @dataclass
