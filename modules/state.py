@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import BotState
 
-DEFAULT_TTL_MINUTES = 10
+DEFAULT_TTL_MINUTES = 30
 
 
 def _now() -> datetime:

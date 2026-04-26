@@ -555,7 +555,9 @@ async def confirm_draft(chat_id: int, db: AsyncSession) -> IngestResult:
     """User pressed ✅ Всё верно on the verification card."""
     bs = await state.get_state(db, chat_id)
     if bs is None or bs.state != "awaiting_ocr_verification":
-        return IngestResult(text="Нечего подтверждать.")
+        return IngestResult(
+            text=("Черновик уже неактивен — TTL истёк или был сброшен. Пришли документ заново.")
+        )
 
     draft: dict[str, Any] = bs.context.get("draft") or {}
     owner_id = await _resolve_owner_id(db, draft)
@@ -588,11 +590,24 @@ async def request_edit(chat_id: int, db: AsyncSession) -> IngestResult:
     """User pressed ✏️ Исправить — switch to awaiting_ocr_edit, ask for phrase."""
     bs = await state.get_state(db, chat_id)
     if bs is None or bs.state != "awaiting_ocr_verification":
-        return IngestResult(text="Нечего редактировать.")
+        logger.warning(
+            "request_edit: no active draft for chat=%s (state=%s)",
+            chat_id,
+            None if bs is None else bs.state,
+        )
+        return IngestResult(
+            text=("Черновик уже неактивен — TTL истёк или был сброшен. Пришли документ заново.")
+        )
     draft = bs.context.get("draft") or {}
     await state.set_state(db, chat_id, "awaiting_ocr_edit", {"draft": draft})
     return IngestResult(
-        text="Что исправить? Напиши одной фразой (например: «серия 4515, ФИО Иванова Анна Сергеевна»)."
+        text=(
+            "✏️ <b>Что исправить?</b>\n\n"
+            "Напиши одной фразой, например:\n"
+            "• <i>серия 4515, ФИО Иванова Анна Сергеевна</i>\n"
+            "• <i>выдан 2020-05-12, кем выдан УФМС 770-001</i>\n\n"
+            "Я обновлю карточку и снова спрошу подтверждение."
+        )
     )
 
 

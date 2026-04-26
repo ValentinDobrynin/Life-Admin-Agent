@@ -358,6 +358,8 @@ async def test_apply_edit_runs_patch_and_returns_card(session: AsyncSession) -> 
     await state.set_state(session, 80, "awaiting_ocr_verification", {"draft": draft})
     r = await ingest.request_edit(80, session)
     assert "Что исправить" in r.text
+    bs2 = await state.get_state(session, 80)
+    assert bs2 is not None and bs2.state == "awaiting_ocr_edit"
 
     patched = {
         "type": "document",

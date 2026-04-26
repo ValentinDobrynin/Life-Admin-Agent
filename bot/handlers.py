@@ -73,6 +73,7 @@ async def handle_update(update: dict[str, Any], db: AsyncSession) -> None:
     caption: str = msg.get("caption") or ""
 
     if text.startswith("/"):
+        logger.info("dispatch command=%s", text.split()[0] if text else "")
         await _command_router(chat_id, text, db)
         return
 
@@ -80,6 +81,12 @@ async def handle_update(update: dict[str, Any], db: AsyncSession) -> None:
 
     files = await _extract_files(msg)
     if files:
+        logger.info(
+            "dispatch files=%d album=%s caption_len=%d",
+            len(files),
+            bool(media_group_id),
+            len(caption),
+        )
         if media_group_id:
             await _album_collect(chat_id, media_group_id, files, caption, db)
         else:
@@ -87,6 +94,7 @@ async def handle_update(update: dict[str, Any], db: AsyncSession) -> None:
         return
 
     if text:
+        logger.info("dispatch text len=%d", len(text))
         await _route_text(chat_id, text, db)
 
 
@@ -355,42 +363,53 @@ async def _send_record(
 async def callback_router(cb: dict[str, Any], db: AsyncSession) -> None:
     cb_id: str = cb["id"]
     data: str = cb.get("data") or ""
-    chat_id = cb.get("message", {}).get("chat", {}).get("id")
+    msg = cb.get("message") or {}
+    chat_id = msg.get("chat", {}).get("id")
+    message_id = msg.get("message_id")
+    logger.info("callback data=%s chat=%s msg=%s", data, chat_id, message_id)
+
     if chat_id is None or chat_id != settings.telegram_chat_id:
+        logger.warning("callback from unauthorised chat=%s", chat_id)
         await client.answer_callback_query(cb_id)
         return
 
     await client.answer_callback_query(cb_id)
 
     if data == "verify_ok":
+        await _strip_buttons(chat_id, message_id, "✅ Сохраняю…")
         result = await ingest.confirm_draft(chat_id, db)
         await _deliver_result(chat_id, result)
         return
     if data == "verify_edit":
+        await _strip_buttons(chat_id, message_id, "✏️ Жду исправление…")
         result = await ingest.request_edit(chat_id, db)
         await _deliver_result(chat_id, result)
         return
     if data == "photos_more":
-        await notifications.send_text(chat_id, "Жду следующее фото.")
+        await _strip_buttons(chat_id, message_id, "📎 Жду следующее фото.")
         return
     if data == "photos_done":
-        await notifications.send_text(chat_id, "📥 Распознаю фото…")
+        await _strip_buttons(chat_id, message_id, "📥 Распознаю фото…")
         result = await ingest.finish_more_photos(chat_id, db)
         await _deliver_result(chat_id, result)
         return
     if data == "dup_new":
+        await _strip_buttons(chat_id, message_id, "🆕 Создаю новый документ…")
         result = await ingest.resolve_duplicate(chat_id, "new", db)
         await notifications.send_text(chat_id, result.text)
         return
     if data == "dup_merge":
+        await _strip_buttons(chat_id, message_id, "📎 Дополняю существующий…")
         result = await ingest.resolve_duplicate(chat_id, "merge", db)
         await notifications.send_text(chat_id, result.text)
         return
     if data == "dup_replace":
+        await _strip_buttons(chat_id, message_id, "♻️ Заменяю существующий…")
         result = await ingest.resolve_duplicate(chat_id, "replace", db)
         await notifications.send_text(chat_id, result.text)
         return
     if data.startswith("pick_"):
+        await _strip_buttons(chat_id, message_id, None)
         await _handle_pick(chat_id, data, db)
         return
     if data.startswith("send_doc_"):
@@ -404,6 +423,26 @@ async def callback_router(cb: dict[str, Any], db: AsyncSession) -> None:
             return
         await _send_record(chat_id, "document", rec, action="send_both")
         return
+
+    logger.warning("unknown callback data=%s", data)
+
+
+async def _strip_buttons(
+    chat_id: int | None,
+    message_id: int | None,
+    status: str | None,
+) -> None:
+    """Remove inline keyboard from the original message and (optionally) send a
+    short status note. Gives the user immediate visual feedback that the button
+    was registered, even if the follow-up reply takes a few seconds."""
+    if chat_id is None or message_id is None:
+        return
+    try:
+        await client.edit_message_reply_markup(chat_id, message_id, None)
+    except Exception:
+        logger.exception("strip_buttons failed for chat=%s msg=%s", chat_id, message_id)
+    if status:
+        await notifications.send_text(chat_id, status)
 
 
 async def _handle_pick(chat_id: int, data: str, db: AsyncSession) -> None:

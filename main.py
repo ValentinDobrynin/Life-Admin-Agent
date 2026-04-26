@@ -70,6 +70,9 @@ async def webhook_telegram(request: Request) -> JSONResponse:
     update: dict[str, Any] = await request.json()
 
     update_id = update.get("update_id")
+    kind = _update_kind(update)
+    logger.info("webhook update_id=%s kind=%s", update_id, kind)
+
     if isinstance(update_id, int):
         if update_id in _seen_set:
             logger.info("Skipping duplicate update_id=%s", update_id)
@@ -85,6 +88,23 @@ async def webhook_telegram(request: Request) -> JSONResponse:
     task.add_done_callback(_background_tasks.discard)
 
     return JSONResponse({"ok": True})
+
+
+def _update_kind(update: dict[str, Any]) -> str:
+    """Return short tag for the update (callback/text/photo/document/etc)."""
+    if "callback_query" in update:
+        data = update["callback_query"].get("data") or ""
+        return f"callback:{data}"
+    msg = update.get("message") or update.get("edited_message") or {}
+    if "photo" in msg:
+        return "photo"
+    if "document" in msg:
+        return "document"
+    if msg.get("text", "").startswith("/"):
+        return f"command:{msg['text'].split()[0]}"
+    if msg.get("text"):
+        return "text"
+    return "unknown"
 
 
 async def _process_update_safe(update: dict[str, Any]) -> None:

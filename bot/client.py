@@ -58,6 +58,26 @@ async def edit_message_text(
         return resp.json()  # type: ignore[no-any-return]
 
 
+async def edit_message_reply_markup(
+    chat_id: int,
+    message_id: int,
+    reply_markup: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Edit only the inline keyboard of a previously sent message.
+
+    Pass `None` to remove the keyboard entirely.
+    """
+    payload: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id}
+    if reply_markup is None:
+        payload["reply_markup"] = {"inline_keyboard": []}
+    else:
+        payload["reply_markup"] = reply_markup
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(_url("editMessageReplyMarkup"), json=payload, timeout=10)
+        resp.raise_for_status()
+        return resp.json()  # type: ignore[no-any-return]
+
+
 async def answer_callback_query(callback_query_id: str, text: str = "") -> None:
     payload: dict[str, Any] = {"callback_query_id": callback_query_id}
     if text:
