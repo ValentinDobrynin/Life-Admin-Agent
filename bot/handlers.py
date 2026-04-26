@@ -217,7 +217,7 @@ async def _route_text(chat_id: int, text: str, db: AsyncSession) -> None:
 
     if bs is not None and bs.state == "awaiting_ocr_edit":
         result = await ingest.apply_edit(chat_id, text, db)
-        await notifications.send_text(chat_id, result.text, keyboard=result.keyboard)
+        await _deliver_result(chat_id, result)
         return
 
     if bs is not None and bs.state in {
@@ -235,7 +235,7 @@ async def _route_text(chat_id: int, text: str, db: AsyncSession) -> None:
     intent, classified = await ingest.detect_intent_text(text, db)
     if intent == "ingest":
         result = await ingest.ingest_text(chat_id, text, db, classified=classified)
-        await notifications.send_text(chat_id, result.text, keyboard=result.keyboard)
+        await _deliver_result(chat_id, result)
     else:
         await _run_query(chat_id, text, db)
 
@@ -250,10 +250,29 @@ async def _route_files(
     bs = await state.get_state(db, chat_id)
     if bs is not None and bs.state == "awaiting_more_photos":
         result = await ingest.add_more_photos(chat_id, files, db)
-        await notifications.send_text(chat_id, result.text, keyboard=result.keyboard)
+        await _deliver_result(chat_id, result)
         return
 
+    if _needs_ack(files, is_album):
+        await notifications.send_text(chat_id, "📥 Принял, обрабатываю…")
+
     result = await ingest.ingest_files(chat_id, files, caption, is_album, db)
+    await _deliver_result(chat_id, result)
+
+
+def _needs_ack(files: list[FileInput], is_album: bool) -> bool:
+    """Heavy processing (PDF or multiple files) — show acknowledgement so the
+    user knows the bot received the message even if classify takes 10+ sec."""
+    if is_album or len(files) > 1:
+        return True
+    f = files[0]
+    ct = (f.content_type or "").lower()
+    return ct == "application/pdf" or f.filename.lower().endswith(".pdf")
+
+
+async def _deliver_result(chat_id: int, result: ingest.IngestResult) -> None:
+    if result.preamble:
+        await notifications.send_text(chat_id, result.preamble)
     await notifications.send_text(chat_id, result.text, keyboard=result.keyboard)
 
 
@@ -345,18 +364,19 @@ async def callback_router(cb: dict[str, Any], db: AsyncSession) -> None:
 
     if data == "verify_ok":
         result = await ingest.confirm_draft(chat_id, db)
-        await notifications.send_text(chat_id, result.text, keyboard=result.keyboard)
+        await _deliver_result(chat_id, result)
         return
     if data == "verify_edit":
         result = await ingest.request_edit(chat_id, db)
-        await notifications.send_text(chat_id, result.text, keyboard=result.keyboard)
+        await _deliver_result(chat_id, result)
         return
     if data == "photos_more":
         await notifications.send_text(chat_id, "Жду следующее фото.")
         return
     if data == "photos_done":
+        await notifications.send_text(chat_id, "📥 Распознаю фото…")
         result = await ingest.finish_more_photos(chat_id, db)
-        await notifications.send_text(chat_id, result.text, keyboard=result.keyboard)
+        await _deliver_result(chat_id, result)
         return
     if data == "dup_new":
         result = await ingest.resolve_duplicate(chat_id, "new", db)

@@ -150,8 +150,8 @@ async def test_ingest_files_album_shows_verification(session: AsyncSession) -> N
         },
     }
 
-    async def fake_ocr(files: Any) -> str:
-        return "паспорт распознан"
+    async def fake_ocr(files: Any) -> ingest._OcrResult:
+        return ingest._OcrResult(text="паспорт распознан")
 
     with (
         patch("modules.ingest._upload_files_now", _stub_upload()),

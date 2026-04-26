@@ -11,6 +11,12 @@ logger = logging.getLogger(__name__)
 # real text; below that threshold the caller should fall back to Vision OCR.
 _MIN_TEXT_LEN = 30
 
+# Hard cap on how many pages we render to images for OCR fallback. PyMuPDF
+# rasterisation + base64-encoded payloads to OpenAI Vision are memory-heavy;
+# on Render Starter (512 MB RAM) anything past a handful of pages risks OOM.
+DEFAULT_MAX_OCR_PAGES = 3
+DEFAULT_OCR_DPI = 150
+
 
 def extract_text_layer(pdf_bytes: bytes) -> str:
     """Extract text from a PDF using its text layer. Returns "" for scans / invalid input."""
@@ -33,31 +39,40 @@ def extract_text_layer(pdf_bytes: bytes) -> str:
     return "\n\n".join(chunks).strip()
 
 
-def render_pages_to_images(pdf_bytes: bytes, dpi: int = 200) -> list[bytes]:
-    """Render every PDF page to a PNG image. Used as Vision OCR fallback for scans.
+def render_pages_to_images(
+    pdf_bytes: bytes,
+    dpi: int = DEFAULT_OCR_DPI,
+    max_pages: int = DEFAULT_MAX_OCR_PAGES,
+) -> tuple[list[bytes], int]:
+    """Render the first ``max_pages`` PDF pages to PNG images for Vision OCR.
 
-    Returns an empty list if PyMuPDF is unavailable or the PDF cannot be opened.
-    Lazily imports pymupdf so unrelated tests don't pay the import cost.
+    Returns ``(images, total_pages)``. ``len(images) < total_pages`` means we
+    truncated; the caller should surface that to the user. Returns ``([], 0)``
+    if PyMuPDF is unavailable or the PDF cannot be opened.
     """
     try:
         import pymupdf  # type: ignore[import-untyped]
     except ImportError:
         logger.warning("pymupdf is not installed — scanned PDF fallback disabled")
-        return []
+        return [], 0
 
     try:
         doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
     except Exception:
         logger.exception("pymupdf failed to open PDF")
-        return []
+        return [], 0
 
     images: list[bytes] = []
     zoom = dpi / 72.0
     matrix = pymupdf.Matrix(zoom, zoom)
     try:
-        for page in doc:
+        total_pages = len(doc)
+        for i, page in enumerate(doc):
+            if i >= max_pages:
+                break
             pix = page.get_pixmap(matrix=matrix)
             images.append(pix.tobytes("png"))
+            del pix
     finally:
         doc.close()
-    return images
+    return images, total_pages

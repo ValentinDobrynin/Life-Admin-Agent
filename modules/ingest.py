@@ -51,6 +51,7 @@ class FileInput:
 class IngestResult:
     text: str
     keyboard: dict[str, Any] | None = None
+    preamble: str | None = None
 
 
 def _client() -> AsyncOpenAI:
@@ -142,9 +143,22 @@ async def _patch(draft: dict[str, Any], phrase: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-async def _ocr_files(files: list[FileInput]) -> str:
-    """Run OCR/text-extract over a batch of files. Returns concatenated text."""
+@dataclass
+class _OcrResult:
+    text: str
+    truncated_pdf: tuple[int, int] | None = None
+
+
+async def _ocr_files(files: list[FileInput]) -> _OcrResult:
+    """Run OCR/text-extract over a batch of files.
+
+    Returns ``_OcrResult`` with concatenated text and an optional
+    ``truncated_pdf=(processed, total)`` if any scanned PDF exceeded the
+    OCR page cap.
+    """
     chunks: list[str] = []
+    truncated: tuple[int, int] | None = None
+
     for f in files:
         ct = (f.content_type or "").lower()
         if ct.startswith("image/"):
@@ -154,7 +168,9 @@ async def _ocr_files(files: list[FileInput]) -> str:
         elif ct == "application/pdf" or f.filename.lower().endswith(".pdf"):
             text = pdf.extract_text_layer(f.bytes_)
             if not text:
-                images = pdf.render_pages_to_images(f.bytes_)
+                images, total_pages = pdf.render_pages_to_images(f.bytes_)
+                if images and total_pages > len(images):
+                    truncated = (len(images), total_pages)
                 parts: list[str] = []
                 for img in images:
                     page_text = await vision.ocr_image(img, mime="image/png")
@@ -163,7 +179,7 @@ async def _ocr_files(files: list[FileInput]) -> str:
                 text = "\n\n".join(parts)
             if text:
                 chunks.append(text)
-    return "\n\n".join(chunks).strip()
+    return _OcrResult(text="\n\n".join(chunks).strip(), truncated_pdf=truncated)
 
 
 def _upload_files_now(files: list[FileInput], prefix: str) -> list[dict[str, Any]]:
@@ -475,9 +491,21 @@ async def ingest_files(
 
     prefix = "document"
     uploaded = _upload_files_now(files, prefix=prefix)
-    ocr_text = await _ocr_files(files)
-    classified = await _classify(text=caption, ocr_text=ocr_text, db=db)
-    return await _proceed_after_classify(db, chat_id, classified, files=uploaded)
+    ocr = await _ocr_files(files)
+    # Free file bytes once OCR + upload are done; the rest of the pipeline
+    # only needs metadata. Important on Render Starter where 5 MB PDFs +
+    # rendered pages can push us past the 512 MB memory limit.
+    for f in files:
+        f.bytes_ = b""
+    classified = await _classify(text=caption, ocr_text=ocr.text, db=db)
+    result = await _proceed_after_classify(db, chat_id, classified, files=uploaded)
+    if ocr.truncated_pdf is not None:
+        processed, total = ocr.truncated_pdf
+        result.preamble = (
+            f"⚠️ PDF на {total} стр. — распознал только первые {processed}. "
+            "Если данные на других страницах, пришли их отдельно как фото."
+        )
+    return result
 
 
 async def add_more_photos(chat_id: int, files: list[FileInput], db: AsyncSession) -> IngestResult:

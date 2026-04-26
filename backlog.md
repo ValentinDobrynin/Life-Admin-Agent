@@ -98,6 +98,31 @@
 
 ## ✅ Done
 
+### [OPS-002] Починить webhook: PDF убивал инстанс по OOM
+
+**Status:** ✅ Done
+**Priority:** High
+**Component:** `main.py`, `bot/handlers.py`, `modules/ingest.py`, `modules/pdf.py`
+
+**Problem Description**
+После первого деплоя пользователь прислал PDF — бот молчал. По логам и метрикам Render: webhook синхронно качал файл (5 MB), грузил в R2, рендерил все страницы PDF в PNG (DPI 200) через pymupdf и слал каждую в OpenAI Vision. Полная обработка заняла >50 секунд → Telegram retried webhook → процесс упал по OOM (память выросла со 121 MB до 478 MB при лимите 512 MB на Render Starter) → Telegram ретраил снова → loop. До пользователя не доходило ни одно сообщение.
+
+**Resolution**
+- `main.py`: webhook возвращает `200 OK` мгновенно, сама обработка идёт в `asyncio.create_task` со своей DB-сессией. Хранятся strong-refs на таски, чтобы лоопер их не GC'нул.
+- `main.py`: дедуп `update_id` через in-process LRU (1024 элемента). Защита от ретраев Telegram.
+- `modules/pdf.py`: `render_pages_to_images` теперь возвращает `(images, total_pages)`, дефолтные параметры `dpi=150` и `max_pages=3`. На сканах из 50 страниц память больше не улетает.
+- `modules/ingest.py`: после загрузки в R2 байты файлов сбрасываются (`f.bytes_ = b""`); если PDF был усечён — в `IngestResult.preamble` уходит уведомление пользователю «⚠️ PDF на N стр., распознал только первые M».
+- `bot/handlers.py`: для PDF/album/multi-file отправляется ack-сообщение «📥 Принял, обрабатываю…» сразу, чтобы пользователь видел что бот живой; добавлен `_deliver_result` который доставляет preamble + основной текст.
+
+**Acceptance Criteria**
+- [x] Webhook отвечает 200 быстрее, чем за секунду, на любых типах сообщений.
+- [x] Дубликаты `update_id` игнорируются.
+- [x] PDF >3 страниц не убивает инстанс.
+- [x] Пользователь сразу видит «принял, обрабатываю» на тяжёлых сообщениях.
+- [x] `make check` зелёный (62 теста).
+
+---
+
 ### [OPS-001] Починить деплой на Render: мост со старой alembic-цепочкой
 
 **Status:** ✅ Done
