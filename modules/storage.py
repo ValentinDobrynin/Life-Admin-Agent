@@ -4,6 +4,7 @@ import logging
 import mimetypes
 import uuid
 from pathlib import PurePosixPath
+from typing import Any
 
 import boto3
 from botocore.config import Config
@@ -13,13 +14,15 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-_R2_ENDPOINT = f"https://{settings.r2_account_id}.r2.cloudflarestorage.com"
+
+def _r2_endpoint() -> str:
+    return f"https://{settings.r2_account_id}.r2.cloudflarestorage.com"
 
 
-def _get_client() -> object:
+def _get_client() -> Any:
     return boto3.client(
         "s3",
-        endpoint_url=_R2_ENDPOINT,
+        endpoint_url=_r2_endpoint(),
         aws_access_key_id=settings.r2_access_key_id,
         aws_secret_access_key=settings.r2_secret_access_key,
         config=Config(signature_version="s3v4"),
@@ -27,77 +30,72 @@ def _get_client() -> object:
     )
 
 
+def _make_key(filename: str, prefix: str) -> str:
+    ext = PurePosixPath(filename).suffix
+    return f"{prefix}/{uuid.uuid4().hex}{ext}"
+
+
 def upload_file(
     file_bytes: bytes,
     filename: str,
-    entity_id: int = 0,
+    prefix: str = "files",
     content_type: str | None = None,
-    prefix: str = "entities",
 ) -> str:
-    """Upload bytes to R2 and return the r2_key.
+    """Upload bytes to R2; return r2_key.
 
-    When prefix='entities' and entity_id is set, key is entities/{entity_id}/{uuid}.ext.
-    Otherwise key is {prefix}/{uuid}.ext (e.g. reference/uuid.jpg).
+    Key format: ``{prefix}/{uuid}.ext``. Caller may use prefixes like
+    ``person``, ``document``, ``vehicle``, ``address``, ``note`` to keep
+    the bucket organised.
     """
-    ext = PurePosixPath(filename).suffix
-    unique_name = f"{uuid.uuid4().hex}{ext}"
-    if prefix == "entities" and entity_id:
-        r2_key = f"entities/{entity_id}/{unique_name}"
-    else:
-        r2_key = f"{prefix}/{unique_name}"
-
+    r2_key = _make_key(filename, prefix)
     if content_type is None:
         content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
 
     client = _get_client()
     try:
-        client.put_object(  # type: ignore[attr-defined]
+        client.put_object(
             Bucket=settings.r2_bucket_name,
             Key=r2_key,
             Body=file_bytes,
             ContentType=content_type,
         )
-        logger.info("Uploaded file to R2: %s (%d bytes)", r2_key, len(file_bytes))
+        logger.info("Uploaded %s (%d bytes)", r2_key, len(file_bytes))
         return r2_key
     except ClientError:
-        logger.exception("R2 upload failed for key %s, file %s", r2_key, filename)
+        logger.exception("R2 upload failed: %s", r2_key)
         raise
 
 
 def download_file(r2_key: str) -> bytes:
-    """Download file from R2 by key. Returns raw bytes."""
     client = _get_client()
     try:
-        response = client.get_object(Bucket=settings.r2_bucket_name, Key=r2_key)  # type: ignore[attr-defined]
-        data: bytes = response["Body"].read()
-        logger.info("Downloaded file from R2: %s (%d bytes)", r2_key, len(data))
+        resp = client.get_object(Bucket=settings.r2_bucket_name, Key=r2_key)
+        data: bytes = resp["Body"].read()
         return data
     except ClientError:
-        logger.exception("R2 download failed for key: %s", r2_key)
+        logger.exception("R2 download failed: %s", r2_key)
         raise
 
 
 def get_presigned_url(r2_key: str, expires: int = 3600) -> str:
-    """Generate a presigned URL for temporary access to the file."""
     client = _get_client()
     try:
-        url: str = client.generate_presigned_url(  # type: ignore[attr-defined]
+        url: str = client.generate_presigned_url(
             "get_object",
             Params={"Bucket": settings.r2_bucket_name, "Key": r2_key},
             ExpiresIn=expires,
         )
         return url
     except ClientError:
-        logger.exception("Failed to generate presigned URL for key: %s", r2_key)
+        logger.exception("R2 presigned URL failed: %s", r2_key)
         raise
 
 
 def delete_file(r2_key: str) -> None:
-    """Delete a file from R2 (used in tests / admin)."""
     client = _get_client()
     try:
-        client.delete_object(Bucket=settings.r2_bucket_name, Key=r2_key)  # type: ignore[attr-defined]
-        logger.info("Deleted R2 key: %s", r2_key)
+        client.delete_object(Bucket=settings.r2_bucket_name, Key=r2_key)
+        logger.info("Deleted %s", r2_key)
     except ClientError:
-        logger.exception("R2 delete failed for key: %s", r2_key)
+        logger.exception("R2 delete failed: %s", r2_key)
         raise

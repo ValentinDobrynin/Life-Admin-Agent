@@ -1,117 +1,102 @@
+"""Smoke tests for ORM models — schema creates, basic CRUD works."""
+
 from __future__ import annotations
 
+from datetime import UTC, date, datetime, timedelta
+
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from database import Base
-from models import ChecklistItem, Contact, Entity, EventLog, Reminder, Resource
+from models import (
+    BOT_STATES,
+    DOCUMENT_KINDS,
+    DOCUMENT_STATUSES,
+    PERSON_RELATIONS,
+    Address,
+    BotState,
+    Document,
+    Note,
+    Person,
+    Vehicle,
+)
 
 
-@pytest.fixture
-async def db_session() -> AsyncSession:
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+@pytest.fixture()
+async def session() -> AsyncSession:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with session_factory() as session:
-        yield session
-
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        yield s
     await engine.dispose()
 
 
-async def test_create_entity(db_session: AsyncSession) -> None:
-    entity = Entity(type="certificate", name="SPA сертификат", status="active")
-    db_session.add(entity)
-    await db_session.commit()
-    await db_session.refresh(entity)
+async def test_person_create(session: AsyncSession) -> None:
+    p = Person(full_name="Anna Ivanova", relation="жена")
+    session.add(p)
+    await session.commit()
+    await session.refresh(p)
+    assert p.id is not None
+    assert p.fields == {}
+    assert p.tags == []
+    assert p.files == []
 
-    assert entity.id is not None
-    assert entity.name == "SPA сертификат"
-    assert entity.status == "active"
-    assert entity.created_at is not None
 
+async def test_document_with_owner_and_status(session: AsyncSession) -> None:
+    p = Person(full_name="Anna", relation="жена")
+    session.add(p)
+    await session.flush()
 
-async def test_entity_with_reminder(db_session: AsyncSession) -> None:
-    from datetime import date
-
-    entity = Entity(type="document", name="Страховка", status="active")
-    db_session.add(entity)
-    await db_session.commit()
-
-    reminder = Reminder(
-        entity_id=entity.id,
-        trigger_date=date(2026, 6, 1),
-        rule="before_N_days",
-        status="pending",
+    d = Document(
+        kind="passport",
+        title="Паспорт РФ",
+        owner_person_id=p.id,
+        expires_at=date(2030, 5, 12),
+        fields={"series": "4514", "number": "123456"},
+        tags=["паспорт", "passport"],
     )
-    db_session.add(reminder)
-    await db_session.commit()
-    await db_session.refresh(reminder)
-
-    assert reminder.id is not None
-    assert reminder.entity_id == entity.id
-
-
-async def test_entity_with_checklist(db_session: AsyncSession) -> None:
-    entity = Entity(type="trip", name="Поездка в Турцию", status="active")
-    db_session.add(entity)
-    await db_session.commit()
-
-    item = ChecklistItem(entity_id=entity.id, text="Оформить страховку", position=0)
-    db_session.add(item)
-    await db_session.commit()
-    await db_session.refresh(item)
-
-    assert item.id is not None
-    assert item.status == "open"
+    session.add(d)
+    await session.commit()
+    await session.refresh(d)
+    assert d.status == "active"
+    assert d.fields["series"] == "4514"
+    assert "паспорт" in d.tags
 
 
-async def test_entity_with_resource(db_session: AsyncSession) -> None:
-    entity = Entity(type="document", name="Полис", status="active")
-    db_session.add(entity)
-    await db_session.commit()
+async def test_document_status_replaced(session: AsyncSession) -> None:
+    d = Document(kind="passport", title="x", status="replaced")
+    session.add(d)
+    await session.commit()
 
-    resource = Resource(entity_id=entity.id, type="file", filename="policy.pdf", r2_key="abc/123")
-    db_session.add(resource)
-    await db_session.commit()
-    await db_session.refresh(resource)
-
-    assert resource.id is not None
-    assert resource.r2_key == "abc/123"
+    result = await session.execute(select(Document).where(Document.status == "active"))
+    assert result.scalar_one_or_none() is None
 
 
-async def test_event_log_without_entity(db_session: AsyncSession) -> None:
-    log = EventLog(action="raw_input", payload={"text": "тест"})
-    db_session.add(log)
-    await db_session.commit()
-    await db_session.refresh(log)
-
-    assert log.id is not None
-    assert log.entity_id is None
-    assert log.payload == {"text": "тест"}
+async def test_vehicle_address_note(session: AsyncSession) -> None:
+    v = Vehicle(make="Toyota", model="Camry", plate="A123BC")
+    a = Address(label="дом", city="Москва", street="Тверская 5-12")
+    n = Note(title="ключи от дачи", body="в верхнем ящике")
+    session.add_all([v, a, n])
+    await session.commit()
+    assert v.id and a.id and n.id
 
 
-async def test_contact_with_gift_history(db_session: AsyncSession) -> None:
-    from datetime import date
-
-    contact = Contact(
-        name="Настя",
-        birthday=date(1990, 5, 15),
-        gift_history=[{"year": 2025, "gift": "книга"}],
-        entity_ids=[],
+async def test_bot_state_upsert(session: AsyncSession) -> None:
+    expires = datetime.now(UTC) + timedelta(minutes=10)
+    bs = BotState(
+        chat_id=12345, state="awaiting_more_photos", context={"draft": {}}, expires_at=expires
     )
-    db_session.add(contact)
-    await db_session.commit()
-    await db_session.refresh(contact)
-
-    assert contact.id is not None
-    assert len(contact.gift_history) == 1
+    session.add(bs)
+    await session.commit()
+    await session.refresh(bs)
+    assert bs.state == "awaiting_more_photos"
 
 
-async def test_all_entity_types_valid(db_session: AsyncSession) -> None:
-    types = ["document", "trip", "gift", "certificate", "subscription", "payment", "logistics"]
-    for t in types:
-        entity = Entity(type=t, name=f"Test {t}", status="active")
-        db_session.add(entity)
-    await db_session.commit()
+def test_enums_documented() -> None:
+    assert "passport" in DOCUMENT_KINDS
+    assert "active" in DOCUMENT_STATUSES
+    assert "жена" in PERSON_RELATIONS
+    assert "awaiting_ocr_verification" in BOT_STATES

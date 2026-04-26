@@ -9,7 +9,6 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.routes import router as api_router
 from config import settings
 from database import get_db
 
@@ -42,7 +41,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 
 app = FastAPI(title="Life Admin Agent", lifespan=lifespan)
-app.include_router(api_router)
 
 
 @app.get("/health")
@@ -58,10 +56,8 @@ async def webhook_telegram(
     from bot.handlers import handle_update
 
     update: dict[str, Any] = await request.json()
-    await handle_update(update, db)
+    try:
+        await handle_update(update, db)
+    except Exception:
+        logger.exception("handle_update failed")
     return JSONResponse({"ok": True})
-
-
-@app.post("/webhook/email")
-async def webhook_email() -> JSONResponse:
-    return JSONResponse({"detail": "Not implemented"}, status_code=501)

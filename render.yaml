@@ -16,10 +16,6 @@ services:
         sync: false
       - key: OPENAI_MODEL
         value: gpt-4o
-      - key: MAILGUN_API_KEY
-        sync: false
-      - key: MAILGUN_DOMAIN
-        sync: false
       - key: R2_ACCOUNT_ID
         sync: false
       - key: R2_ACCESS_KEY_ID
@@ -28,17 +24,11 @@ services:
         sync: false
       - key: R2_BUCKET_NAME
         sync: false
-      - key: GOOGLE_CLIENT_ID
-        sync: false
-      - key: GOOGLE_CLIENT_SECRET
-        sync: false
-      - key: GOOGLE_REFRESH_TOKEN
-        sync: false
-      - key: API_KEY
-        sync: false
       - key: RENDER_URL
         sync: false
       - key: TIMEZONE
         value: Europe/Moscow
+      - key: EXPIRY_WINDOW_DAYS
+        value: "30"
       - key: PYTHON_VERSION
         value: 3.11.11

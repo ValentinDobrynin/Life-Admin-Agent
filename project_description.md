@@ -2,127 +2,189 @@
 
 ## Что строим
 
-Персональный операционный диспетчер для бытовых и полуличных задач.
-Агент хранит важные объекты (документы, поездки, подарки, сертификаты, подписки, счета),
-знает их сроки, напоминает заранее и подсказывает следующий шаг.
+Персональное хранилище личных данных и документов с естественно-языковым интерфейсом через Telegram.
 
-Главная ценность — снижение фоновой когнитивной нагрузки.
-Не "умный чатик", а операционный слой над личной жизнью.
+Пользователь присылает боту:
+- свободный текст («Саша Балахнин живёт на Тверской 5-12, телефон ...»)
+- фотографии (паспорт, права, страховка, СТС — одну или несколько в альбоме)
+- PDF (сканы документов)
+
+Бот:
+1. распознаёт содержимое (Vision OCR / PDF text extraction),
+2. классифицирует в одну из пяти типизированных сущностей,
+3. показывает результат на верификацию,
+4. сохраняет в БД и Cloudflare R2.
+
+По запросу («пришли паспорт жены», «где живёт Саша», «срок прав?») — выдаёт нужную запись (файл + текстовая выжимка).
+
+Один утренний пуш — если что-то из документов истекает в ближайшие 30 дней.
+
+Главная ценность — единое место для бытовых документов и сведений с быстрой выдачей в Telegram.
 
 ## Для кого
 
-Один пользователь + семья. Один аккаунт, никакой мультиюзерности.
-Продукт для себя, не SaaS.
+Один пользователь + семья. Один аккаунт, никакой мультиюзерности. Продукт для себя, не SaaS.
 
 ## Стек
 
 | Слой | Технология |
 |------|-----------|
 | Backend | Python 3.11+, FastAPI |
-| База данных | PostgreSQL (Render managed) |
-| ORM / миграции | SQLAlchemy + Alembic |
-| Планировщик | APScheduler (внутри FastAPI, не отдельный сервис) |
-| Telegram | aiogram (webhook, не polling) |
-| Email inbound | Mailgun inbound parsing → POST на /webhook/email |
-| LLM | OpenAI API (gpt-4o) |
+| База данных | PostgreSQL (Render managed), aiosqlite для тестов |
+| ORM / миграции | SQLAlchemy 2 + Alembic |
+| Планировщик | APScheduler (внутри FastAPI lifespan) |
+| Telegram | httpx + raw Bot API (webhook, не polling) |
+| LLM | OpenAI API (gpt-4o) — classify, patch, retrieve |
+| Vision OCR | OpenAI Vision (через тот же gpt-4o) |
+| PDF | pypdf (текст), fallback на pdfplumber |
 | Файлы | Cloudflare R2 (boto3 с кастомным endpoint_url) |
-| Google Calendar | google-api-python-client (перенесён из calendar_bot) |
-| Деплой | Render Web Service |
+| Деплой | Render Web Service, plan: starter |
 
 ## Архитектурные принципы
 
-**1. Никакой бизнес-логики в роутерах**
-Роутеры (`bot/handlers.py`, `api/routes.py`) только принимают запрос и вызывают модуль.
-Вся логика — в `modules/`. Роутер не знает, что такое entity или reminder.
+**1. Никакой бизнес-логики в роутерах.**
+`bot/handlers.py` и `main.py` только принимают запрос и делегируют. Вся логика в `modules/`.
 
-**2. Все внешние вызовы через отдельный модуль**
-OpenAI → только через `modules/parser.py` и `modules/suggestions.py`.
-Telegram → только через `modules/notifications.py`.
-Google Calendar → только через `modules/google_calendar.py`.
-Cloudflare R2 → только через `modules/storage.py`.
-Прямых вызовов внешних API из handlers или scheduler — нет.
+**2. Все внешние вызовы через свои модули.**
+- OpenAI → `modules/ingest.py`, `modules/search.py`
+- OpenAI Vision → `modules/vision.py`
+- Telegram → `bot/client.py`
+- Cloudflare R2 → `modules/storage.py`
+- PDF → `modules/pdf.py`
 
-**3. Никогда не удалять, только архивировать**
-Любой объект в БД может быть archived или paused, но не удалён.
-История в event_log — неприкосновенна.
+Прямых вызовов внешних API из handlers/scheduler — нет.
 
-**4. Digest first, push only for urgent**
-Нессрочные напоминания идут в утренний дайджест.
-Точечный пуш — только если объект истекает в течение 48 часов или помечен как срочный.
+**3. Типизированные записи, не «универсальный bag».**
+Пять таблиц: `person`, `document`, `vehicle`, `address`, `note`. Каждая со своим набором полей. JSON-поля `fields`/`tags` — для гибкости внутри типа.
 
-**5. Каждое сообщение пользователю — action-oriented**
-Любое уведомление заканчивается inline-кнопками или явным next_action.
-Информация без действия — не отправляется.
+**4. Никогда не удаляем — помечаем `replaced`.**
+У `document` есть `status: active | replaced`. При замене старая запись остаётся в БД, не выдаётся при retrieve.
 
-**6. Модули изолированы**
-Каждый модуль импортирует только то, что ему нужно из `models.py` и других модулей.
-Циклических зависимостей нет.
-Порядок зависимостей: models → modules → bot/api → scheduler.
+**5. Каждое сообщение пользователю — action-oriented.**
+Любой ответ заканчивается inline-кнопками или явным следующим шагом.
+
+**6. Поиск через LLM без векторных БД.**
+В контекст модели грузим компактный JSON всех `active` записей (id, тип, title, key fields, tags, owner). Модель сама выбирает релевантные. Без embeddings, без pgvector. Достаточно при объёме ≤ ~500 записей.
+
+**7. State-machine в БД, не in-memory.**
+Таблица `bot_state` хранит контекст диалога. TTL 10 минут. Переживает рестарты Render.
+
+**8. Модули изолированы.**
+Порядок зависимостей: `models → modules → bot → scheduler`. Циклов нет.
 
 ## Структура проекта
 
 ```
 life-admin-agent/
-├── main.py                  # FastAPI app + lifespan (запуск scheduler)
-├── config.py                # Pydantic Settings, все env vars
-├── database.py              # SQLAlchemy engine + get_db dependency
-├── models.py                # Все 6 таблиц: entities, reminders, checklist_items,
-│                            #   contacts, resources, event_log
-├── scheduler.py             # APScheduler: check_reminders, send_digest, lifecycle_check
+├── main.py                  FastAPI + lifespan (запуск scheduler)
+├── config.py                Pydantic Settings
+├── database.py              SQLAlchemy engine + get_db
+├── models.py                Person, Document, Vehicle, Address, Note, BotState
+├── scheduler.py             APScheduler: 1 job — expiry_check
 ├── bot/
-│   ├── handlers.py          # Telegram webhook handlers (только роутинг)
-│   ├── client.py            # Telegram Bot API client
-│   └── email_handler.py     # Mailgun inbound webhook handler
+│   ├── client.py            Telegram Bot API: send_message, send_document,
+│   │                        send_photo, send_media_group, edit_message_text,
+│   │                        answer_callback_query, get_file
+│   └── handlers.py          webhook router: ingest_path / query_path / callback_router
 ├── modules/
-│   ├── ingestion.py         # Приём raw input, нормализация, сохранение raw_record
-│   ├── parser.py            # OpenAI: извлечение entity из raw input
-│   ├── reminders.py         # Создание и управление reminder rules
-│   ├── suggestions.py       # next_action, shortlist, inline-кнопки
-│   ├── notifications.py     # send_telegram(), send_digest() — единственный выход в TG
-│   ├── storage.py           # Cloudflare R2: upload, get_url
-│   ├── lifecycle.py         # Автоархив, monthly review
-│   ├── google_auth.py       # OAuth credentials (перенесён из calendar_bot)
-│   └── google_calendar.py   # Google Calendar CRUD (перенесён из calendar_bot)
-├── api/
-│   ├── routes.py            # /api/* заглушки (501 Not Implemented) — для будущего Web UI
-│   └── auth.py              # verify_token dependency
+│   ├── storage.py           R2: upload_file, download_file, get_presigned_url
+│   ├── vision.py            OpenAI Vision OCR — text from image bytes
+│   ├── pdf.py               pypdf + fallback на vision для сканов
+│   ├── cards.py             render verification/retrieval cards (HTML for TG)
+│   ├── ingest.py            classify + extract + verification + duplicate-resolution
+│   ├── search.py            LLM-only retrieval over compact index
+│   ├── state.py             CRUD bot_state с TTL
+│   └── notifications.py     send_text, send_files (single или альбом),
+│                            send_expiry_digest
 ├── prompts/
-│   ├── entity_parser.txt    # Системный промпт для Entity Parser
-│   └── suggestion.txt       # Промпт для Suggestion Engine
-└── migrations/              # Alembic
+│   ├── soul.txt             конституция агента (тон, формат)
+│   ├── classify.txt         classify + extract structured fields
+│   ├── patch.txt            apply user phrase as patch to draft JSON
+│   └── retrieve.txt         resolve query → list of matching record ids
+├── tests/                   pytest + pytest-asyncio (sqlite+aiosqlite)
+└── migrations/              Alembic
+    └── versions/
+        └── 0001_initial.py
 ```
 
-## Модель данных (кратко)
+## Модель данных
 
-- **entities** — любой объект реального мира (поездка, полис, сертификат, подарок...)
-- **reminders** — напоминания по entity с правилами (before_N_days, on_date, digest_only...)
-- **checklist_items** — шаги внутри объекта, с зависимостями
-- **contacts** — люди: именинники, контакты поездок, агенты
-- **resources** — файлы и ссылки, привязанные к entity (r2_key или url)
-- **event_log** — история всех действий. Нужна чтобы не напоминать бесконечно об одном
+Все таблицы имеют общие поля: `id`, `tags JSON`, `files JSON` (массив `{r2_key, filename, content_type}`), `created_at`, `updated_at`.
 
-## Категории объектов
+| Таблица | Уникальные поля |
+|---|---|
+| `person` | full_name, birthday, relation (жена/сын/мама/я/...), notes, fields JSON |
+| `document` | kind (passport/driver_license/insurance/visa/certificate/contract/other), title, owner_person_id → person, issued_at, expires_at, status (active/replaced), fields JSON |
+| `vehicle` | make, model, plate, vin, owner_person_id → person, fields JSON |
+| `address` | label, person_id → person (опц.), country, city, street, fields JSON |
+| `note` | title, body, fields JSON |
+| `bot_state` | chat_id (PK), state, context JSON, expires_at |
 
-`document` · `trip` · `gift` · `certificate` · `subscription` · `payment` · `logistics`
+`bot_state.state` ∈
+- `awaiting_more_photos` — после первого одиночного фото, ждём «📎 Ещё / ✅ Готово»
+- `awaiting_ocr_verification` — показана карточка, ждём «✅ Всё верно / ✏️ Исправить»
+- `awaiting_ocr_edit` — после ✏️, ждём текстовое сообщение с правкой
+- `awaiting_dup_resolution` — найден дубликат, ждём «🆕 Новый / 📎 Дополнить / ♻️ Заменить»
+- `awaiting_retrieve_choice` — найдено несколько кандидатов при retrieve, ждём выбора кнопкой
+
+## Поток ingest
+
+```
+1. Telegram webhook → handlers.ingest_path
+2. Файлы (если есть) → R2 → r2_keys
+3. Текст из источников: caption, OCR (vision.py), PDF (pdf.py)
+4. Album buffering: media_group_id агрегируется ~1с в один draft
+5. Single photo без альбома: state=awaiting_more_photos, ждём ✅ Готово
+6. classify.txt: LLM → {type, kind, owner_relation, fields, tags, suggested_title}
+7. Если type=note → save сразу (skip verification)
+8. Иначе → state=awaiting_ocr_verification, send_card(draft) с [✅] [✏️]
+9. ✅ → detect_duplicate (kind + owner_person_id, status='active')
+   - если найден → state=awaiting_dup_resolution, [🆕 Новый] [📎 Дополнить] [♻️ Заменить]
+   - иначе → save, ответ «Сохранил {title} · /<id>»
+10. ✏️ → state=awaiting_ocr_edit, ask «Что исправить?»
+11. На текст в awaiting_ocr_edit → patch.txt → goto 8
+12. Hard delete: команда `/delete <id>` — удаляет запись и файлы из R2
+```
+
+## Поток retrieve
+
+```
+1. Telegram webhook → handlers.query_path
+2. modules/search.build_index() → JSON всех записей (status='active')
+3. retrieve.txt: LLM → {ids: [...], action: send_files | send_text | both | clarify}
+4. 0 → «Ничего не нашёл по запросу»
+5. 1 → отдать файлы (или альбом) + текстовая карточка из fields
+6. >1 → state=awaiting_retrieve_choice, кнопки с title записей
+7. Команда `/get <id>` — прямая выдача без LLM
+```
+
+## Категории объектов и их kind
+
+- `person.relation`: я, жена, муж, сын, дочь, мама, папа, друг, коллега, иное
+- `document.kind`: passport, driver_license, insurance, visa, certificate, contract, snils, inn, medical, other
+- `vehicle`: только make/model/plate/vin — без kind
+- `address.label`: дом, дача, работа, родители, иное
 
 ## Источники данных (MVP)
 
-- Ручной ввод через Telegram
-- Фото и PDF через Telegram (парсинг через OpenAI Vision)
-- Пересылка email на Mailgun-адрес
-- Google Calendar (заглушка на чтение)
+- Ручной ввод текста через Telegram
+- Одиночные фото через Telegram (с подтверждением «ещё страница?»)
+- Альбомы фото через Telegram (media_group_id)
+- PDF через Telegram
 
-## Что явно НЕ делаем (anti-goals)
+## Что явно НЕ делаем
 
-- **Нет автоматического чтения почты** — только пересылка руками. Privacy и хаос.
-- **Нет polling** — только Telegram webhook.
-- **Нет отдельного Background Worker на Render** — Scheduler живёт внутри Web Service.
-- **Нет мультиюзерности** — один аккаунт, без ролей и permissions.
-- **Нет автоплатежей** — агент напоминает и даёт ссылку, не платит сам.
-- **Нет браузерного агента** — не выполняет действия в интернете от имени пользователя.
-- **Нет удаления объектов** — только archive/paused статусы.
-- **Нет бизнес-логики в роутерах** — роутеры только принимают и делегируют.
-- **Web UI не в MVP** — только заглушки /api/* (501). Не реализовывать раньше времени.
+- **Нет email-приёма** — Mailgun выкинут.
+- **Нет Google Calendar** — выкинут.
+- **Нет polling** — только webhook.
+- **Нет отдельного worker** — APScheduler внутри Web Service.
+- **Нет мультиюзерности** — один аккаунт.
+- **Нет автоплатежей и автопродления документов** — только напоминания.
+- **Нет браузерного агента**.
+- **Нет Web UI и /api/*** — выкинуты.
+- **Нет встроенных чек-листов и suggestions/next_action** — выкинуты.
+- **Нет вектора и embeddings** — пока хватает LLM-over-index.
+- **Нет лет архивации/lifecycle** — только status=replaced на document.
 
 ## Переменные окружения
 
@@ -131,25 +193,22 @@ DATABASE_URL=
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 OPENAI_API_KEY=
-MAILGUN_API_KEY=
-MAILGUN_DOMAIN=
+OPENAI_MODEL=gpt-4o
 R2_ACCOUNT_ID=
 R2_ACCESS_KEY_ID=
 R2_SECRET_ACCESS_KEY=
 R2_BUCKET_NAME=
-GOOGLE_CLIENT_ID=
-GOOGLE_CLIENT_SECRET=
-GOOGLE_REFRESH_TOKEN=
-API_KEY=                     # статический токен для /api/* заглушек
+RENDER_URL=
+TIMEZONE=Europe/Moscow
+EXPIRY_WINDOW_DAYS=30      # дефолт; экспортируется в pdt expiry_check_job
 ```
 
 ## Timezone
 
-Europe/Moscow — дефолт для всех дат и напоминаний.
-Хранить в БД всегда в UTC, конвертировать при отображении.
+Europe/Moscow — дефолт. В БД храним UTC, конвертируем при отображении.
 
 ## Язык
 
-Все сообщения пользователю — на русском.
-Код, комментарии, имена переменных — на английском.
-Промпты для OpenAI — на русском (модель работает лучше на том языке, на котором будет отвечать).
+Сообщения пользователю — русский.
+Код, комментарии, имена переменных — английский.
+Промпты для OpenAI — русский.

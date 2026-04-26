@@ -13,7 +13,7 @@ lint:
 	$(PYTHON) -m ruff check .
 
 types:
-	$(PYTHON) -m mypy main.py config.py database.py models.py bot/ modules/ api/
+	$(PYTHON) -m mypy main.py config.py database.py models.py scheduler.py bot/ modules/
 
 test:
 	$(PYTHON) -m pytest

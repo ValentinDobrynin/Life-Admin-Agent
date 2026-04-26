@@ -18,21 +18,57 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database import Base
 
+# Allowed enum values are documented as constants for use in app code/tests.
+PERSON_RELATIONS = {
+    "я",
+    "жена",
+    "муж",
+    "сын",
+    "дочь",
+    "мама",
+    "папа",
+    "брат",
+    "сестра",
+    "друг",
+    "коллега",
+    "иное",
+}
 
-class Entity(Base):
-    __tablename__ = "entities"
+DOCUMENT_KINDS = {
+    "passport",
+    "driver_license",
+    "insurance",
+    "visa",
+    "certificate",
+    "contract",
+    "snils",
+    "inn",
+    "medical",
+    "other",
+}
+
+DOCUMENT_STATUSES = {"active", "replaced"}
+
+BOT_STATES = {
+    "awaiting_more_photos",
+    "awaiting_ocr_verification",
+    "awaiting_ocr_edit",
+    "awaiting_dup_resolution",
+    "awaiting_retrieve_choice",
+}
+
+
+class Person(Base):
+    __tablename__ = "person"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    type: Mapped[str] = mapped_column(String(50), nullable=False)
-    # type ∈ document | trip | gift | certificate | subscription | payment | logistics
-    name: Mapped[str] = mapped_column(String(500), nullable=False)
-    start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
-    end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
-    status: Mapped[str] = mapped_column(String(50), nullable=False, default="active")
-    # status ∈ active | expiring_soon | expired | archived | paused | closed
-    priority: Mapped[str] = mapped_column(String(20), nullable=False, default="normal")
-    owner_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # задел на v2
+    full_name: Mapped[str] = mapped_column(String(500), nullable=False)
+    birthday: Mapped[date | None] = mapped_column(Date, nullable=True)
+    relation: Mapped[str | None] = mapped_column(String(50), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fields: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    tags: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    files: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -40,108 +76,118 @@ class Entity(Base):
         onupdate=func.now(),
     )
 
-    reminders: Mapped[list[Reminder]] = relationship(
-        "Reminder", back_populates="entity", cascade="all, delete-orphan"
+    documents: Mapped[list[Document]] = relationship(
+        "Document", back_populates="owner", foreign_keys="Document.owner_person_id"
     )
-    checklist_items: Mapped[list[ChecklistItem]] = relationship(
-        "ChecklistItem", back_populates="entity", cascade="all, delete-orphan"
+    vehicles: Mapped[list[Vehicle]] = relationship(
+        "Vehicle", back_populates="owner", foreign_keys="Vehicle.owner_person_id"
     )
-    resources: Mapped[list[Resource]] = relationship(
-        "Resource", back_populates="entity", cascade="all, delete-orphan"
+    addresses: Mapped[list[Address]] = relationship(
+        "Address", back_populates="person", foreign_keys="Address.person_id"
     )
-    event_logs: Mapped[list[EventLog]] = relationship("EventLog", back_populates="entity")
 
 
-class Reminder(Base):
-    __tablename__ = "reminders"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    entity_id: Mapped[int] = mapped_column(Integer, ForeignKey("entities.id"), nullable=False)
-    trigger_date: Mapped[date] = mapped_column(Date, nullable=False)
-    rule: Mapped[str] = mapped_column(String(50), nullable=False)
-    # rule ∈ before_N_days | on_date | recurring_weekly | digest_only
-    channel: Mapped[str] = mapped_column(String(50), nullable=False, default="telegram")
-    text: Mapped[str | None] = mapped_column(Text, nullable=True)
-    status: Mapped[str] = mapped_column(String(50), nullable=False, default="pending")
-    # status ∈ pending | sent | snoozed | cancelled
-    snoozed_until: Mapped[date | None] = mapped_column(Date, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-    entity: Mapped[Entity] = relationship("Entity", back_populates="reminders")
-
-
-class ChecklistItem(Base):
-    __tablename__ = "checklist_items"
+class Document(Base):
+    __tablename__ = "document"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    entity_id: Mapped[int] = mapped_column(Integer, ForeignKey("entities.id"), nullable=False)
-    text: Mapped[str] = mapped_column(Text, nullable=False)
-    due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
-    status: Mapped[str] = mapped_column(String(50), nullable=False, default="open")
-    # status ∈ open | done | skipped
-    depends_on: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("checklist_items.id"), nullable=True
+    kind: Mapped[str] = mapped_column(String(50), nullable=False)
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    owner_person_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("person.id"), nullable=True
     )
-    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-
-    entity: Mapped[Entity] = relationship("Entity", back_populates="checklist_items")
-
-
-class Contact(Base):
-    __tablename__ = "contacts"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    name: Mapped[str] = mapped_column(String(500), nullable=False)
-    birthday: Mapped[date | None] = mapped_column(Date, nullable=True)
-    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
-    gift_history: Mapped[list[Any]] = mapped_column(JSON, nullable=False, default=list)
-    entity_ids: Mapped[list[int]] = mapped_column(JSON, nullable=False, default=list)
+    issued_at: Mapped[date | None] = mapped_column(Date, nullable=True)
+    expires_at: Mapped[date | None] = mapped_column(Date, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
+    fields: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    tags: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    files: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    owner: Mapped[Person | None] = relationship(
+        "Person", back_populates="documents", foreign_keys=[owner_person_id]
+    )
 
 
-class Resource(Base):
-    __tablename__ = "resources"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    entity_id: Mapped[int] = mapped_column(Integer, ForeignKey("entities.id"), nullable=False)
-    type: Mapped[str] = mapped_column(String(50), nullable=False)
-    # type ∈ file | link | contact
-    url: Mapped[str | None] = mapped_column(Text, nullable=True)
-    r2_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    filename: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
-
-    entity: Mapped[Entity] = relationship("Entity", back_populates="resources")
-
-
-class EventLog(Base):
-    __tablename__ = "event_log"
+class Vehicle(Base):
+    __tablename__ = "vehicle"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    entity_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("entities.id"), nullable=True)
-    action: Mapped[str] = mapped_column(String(100), nullable=False)
-    payload: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    make: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    plate: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    vin: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    owner_person_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("person.id"), nullable=True
+    )
+    fields: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    tags: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    files: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
 
-    entity: Mapped[Entity | None] = relationship("Entity", back_populates="event_logs")
+    owner: Mapped[Person | None] = relationship(
+        "Person", back_populates="vehicles", foreign_keys=[owner_person_id]
+    )
 
 
-class ReferenceData(Base):
-    __tablename__ = "reference_data"
+class Address(Base):
+    __tablename__ = "address"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    type: Mapped[str] = mapped_column(String(50), nullable=False)
-    # type ∈ person | car | address | document
-    label: Mapped[str] = mapped_column(String(200), nullable=False)
-    data: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
-    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
-    r2_keys: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
-    # r2_keys — ключи файлов в Cloudflare R2 (сканы документа, несколько страниц)
-    owner_ref_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    # owner_ref_id — id записи type=person в той же таблице (мягкая связь без FK)
-    relation: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    # relation — роль человека: жена, муж, сын, дочь, мама, папа, друг, подруга, я
+    label: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    person_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("person.id"), nullable=True)
+    country: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    city: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    street: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    fields: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    tags: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    files: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    person: Mapped[Person | None] = relationship(
+        "Person", back_populates="addresses", foreign_keys=[person_id]
+    )
+
+
+class Note(Base):
+    __tablename__ = "note"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    body: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fields: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    tags: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    files: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class BotState(Base):
+    __tablename__ = "bot_state"
+
+    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    state: Mapped[str] = mapped_column(String(50), nullable=False)
+    context: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

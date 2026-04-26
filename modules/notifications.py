@@ -1,227 +1,120 @@
+"""High-level Telegram notifications: text + files + expiry digest."""
+
 from __future__ import annotations
 
 import logging
-from datetime import date
-from typing import TYPE_CHECKING, Any
+from datetime import date, timedelta
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import client
 from config import settings
-from models import Entity, Reminder
-
-if TYPE_CHECKING:
-    from modules.suggestions import EnrichedReminder
+from models import Document, Person
+from modules import storage
 
 logger = logging.getLogger(__name__)
 
-_CATEGORY_EMOJI = {
-    "document": "📄",
-    "trip": "✈️",
-    "gift": "🎁",
-    "certificate": "🎟",
-    "subscription": "🔄",
-    "payment": "💳",
-    "logistics": "📦",
-}
 
-MAX_DIGEST_ITEMS = 7
-
-
-async def send_confirmation(entity: Entity, extra_text: str = "") -> None:
-    """Send capture confirmation to the user with action buttons."""
-    emoji = _CATEGORY_EMOJI.get(entity.type, "📌")
-    dates_str = _format_dates(entity)
-    text = f"{emoji} Сохранил.\n<b>{entity.name}</b>{dates_str}"
-    if extra_text:
-        text += f"\n{extra_text}"
-
-    buttons = make_capture_buttons(entity.id)
-    await client.send_message(
-        chat_id=settings.telegram_chat_id,
-        text=text,
-        reply_markup=client.make_inline_keyboard(buttons),
-    )
-
-
-async def send_enriched_reminder(enriched: EnrichedReminder) -> None:
-    """Send a point-push reminder with next_action, resources and snooze buttons."""
-    entity = enriched.entity
-    reminder = enriched.reminder
-    emoji = _CATEGORY_EMOJI.get(entity.type, "📌")
-
-    lines = [f"{emoji} <b>{entity.name}</b>{_format_dates(entity)}"]
-
-    if enriched.next_action:
-        lines.append(f"➡️ {enriched.next_action}")
-
-    if enriched.missing_checklist:
-        missing = enriched.missing_checklist[:3]
-        lines.append("❌ <b>Не хватает:</b>")
-        for item in missing:
-            lines.append(f"  • {item}")
-
-    if enriched.note:
-        lines.append(f"⚠️ {enriched.note}")
-
-    if enriched.shortlist:
-        lines.append("💡 Идеи: " + " · ".join(enriched.shortlist[:3]))
-
-    today = date.today()
-    days_left: int | None = None
-    if entity.start_date:
-        days_left = (entity.start_date - today).days
-    elif entity.end_date:
-        days_left = (entity.end_date - today).days
-
-    buttons = _make_reminder_buttons(reminder.id, entity.id, entity.type, days_left)
-    await client.send_message(
-        chat_id=settings.telegram_chat_id,
-        text="\n".join(lines),
-        reply_markup=client.make_inline_keyboard(buttons),
-    )
-
-
-async def send_reminder(reminder: Reminder, entity: Entity) -> None:
-    """Send a basic reminder (without suggestion enrichment)."""
-    emoji = _CATEGORY_EMOJI.get(entity.type, "📌")
-    text = f"{emoji} <b>{entity.name}</b>{_format_dates(entity)}"
-
-    today = date.today()
-    days_left: int | None = None
-    if entity.start_date:
-        days_left = (entity.start_date - today).days
-    elif entity.end_date:
-        days_left = (entity.end_date - today).days
-
-    buttons = _make_reminder_buttons(reminder.id, entity.id, entity.type, days_left)
-    await client.send_message(
-        chat_id=settings.telegram_chat_id,
-        text=text,
-        reply_markup=client.make_inline_keyboard(buttons),
-    )
-
-
-async def send_digest(items: list[tuple[Reminder, Entity]]) -> None:
-    """Send the daily digest — max 7 items grouped by urgency."""
-    if not items:
-        return
-
-    from datetime import date
-
-    today = date.today()
-    urgent: list[tuple[Reminder, Entity]] = []
-    this_week: list[tuple[Reminder, Entity]] = []
-
-    for reminder, entity in items:
-        delta = (reminder.trigger_date - today).days
-        if delta <= 2:
-            urgent.append((reminder, entity))
-        else:
-            this_week.append((reminder, entity))
-
-    lines = ["📋 <b>Life Admin Brief</b>"]
-
-    urgent_shown = urgent[:3]
-    week_slots = MAX_DIGEST_ITEMS - len(urgent_shown)
-    week_shown = this_week[:week_slots]
-
-    if urgent_shown:
-        lines.append("\n🔴 <b>Срочно:</b>")
-        for reminder, entity in urgent_shown:
-            lines.append(_digest_line(reminder, entity, today))
-
-    if week_shown:
-        lines.append("\n📅 <b>На этой неделе:</b>")
-        for reminder, entity in week_shown:
-            lines.append(_digest_line(reminder, entity, today))
-
-    await client.send_message(
-        chat_id=settings.telegram_chat_id,
-        text="\n".join(lines),
-    )
-
-
-async def send_proactive_hints(hints: list[str]) -> None:
-    """Send proactive suggestion hints (if any)."""
-    if not hints:
-        return
-    text = "💡 <b>Подсказки:</b>\n" + "\n".join(f"• {h}" for h in hints)
-    await client.send_message(chat_id=settings.telegram_chat_id, text=text)
-
-
-async def send_message(
+async def send_text(
+    chat_id: int,
     text: str,
-    buttons: list[list[dict[str, str]]] | None = None,
+    keyboard: dict[str, Any] | None = None,
 ) -> None:
-    """Send a plain message to the configured chat."""
-    reply_markup: dict[str, Any] | None = None
-    if buttons:
-        reply_markup = client.make_inline_keyboard(buttons)
-    await client.send_message(
-        chat_id=settings.telegram_chat_id,
-        text=text,
-        reply_markup=reply_markup,
-    )
+    try:
+        await client.send_message(chat_id, text, reply_markup=keyboard)
+    except Exception:
+        logger.exception("send_text failed for chat=%s", chat_id)
 
 
-def make_capture_buttons(entity_id: int) -> list[list[dict[str, str]]]:
-    return [
-        [
-            {"text": "✅ OK", "callback_data": f"ok_{entity_id}"},
-            {"text": "📎 Добавить файл", "callback_data": f"attach_{entity_id}"},
-        ],
-        [
-            {"text": "✏️ Изменить", "callback_data": f"edit_{entity_id}"},
-        ],
-    ]
+async def send_files(
+    chat_id: int,
+    files: list[dict[str, Any]],
+    caption: str | None = None,
+) -> None:
+    """Send saved files as a media-group (photos) or one-by-one (PDF/etc)."""
+    if not files:
+        return
 
-
-def _make_reminder_buttons(
-    reminder_id: int,
-    entity_id: int,
-    entity_type: str = "",
-    days_left: int | None = None,
-) -> list[list[dict[str, str]]]:
-    is_urgent_trip = entity_type == "trip" and days_left is not None and days_left <= 2
-    if is_urgent_trip:
-        return [
-            [
-                {"text": "✅ Готово", "callback_data": f"done_{entity_id}"},
-                {"text": "📋 Чеклист", "callback_data": f"checklist_{entity_id}"},
-            ],
-            [
-                {"text": "🙈 Игнор", "callback_data": f"ignore_{reminder_id}"},
-            ],
-        ]
-    return [
-        [
-            {"text": "✅ Готово", "callback_data": f"done_{entity_id}"},
-            {"text": "⏰ +7 дней", "callback_data": f"later_7d_{reminder_id}"},
-        ],
-        [
-            {"text": "⏰ +3 дня", "callback_data": f"later_3d_{reminder_id}"},
-            {"text": "🙈 Игнор", "callback_data": f"ignore_{reminder_id}"},
-        ],
-    ]
-
-
-def _format_dates(entity: Entity) -> str:
-    if entity.end_date:
-        return f" — до {entity.end_date.strftime('%d.%m.%Y')}"
-    if entity.start_date:
-        return f" — {entity.start_date.strftime('%d.%m.%Y')}"
-    return ""
-
-
-def _digest_line(reminder: Reminder, entity: Entity, today: date) -> str:
-    emoji = _CATEGORY_EMOJI.get(entity.type, "📌")
-    if entity.end_date:
-        delta = (entity.end_date - today).days
-        if delta == 0:
-            suffix = " — сегодня!"
-        elif delta < 0:
-            suffix = f" — просрочено {abs(delta)}д"
+    photos: list[tuple[bytes, str]] = []
+    others: list[dict[str, Any]] = []
+    for f in files:
+        ct = (f.get("content_type") or "").lower()
+        if ct.startswith("image/"):
+            try:
+                data = storage.download_file(f["r2_key"])
+            except Exception:
+                logger.exception("download failed for %s", f.get("r2_key"))
+                continue
+            photos.append((data, f.get("filename") or "photo.jpg"))
         else:
-            suffix = f" — через {delta}д"
-    else:
-        suffix = ""
-    return f"  {emoji} {entity.name}{suffix}"
+            others.append(f)
+
+    if len(photos) >= 2:
+        await client.send_media_group(chat_id, photos, caption=caption)
+    elif len(photos) == 1:
+        data, name = photos[0]
+        await client.send_photo(chat_id, data, filename=name, caption=caption)
+
+    for f in others:
+        try:
+            data = storage.download_file(f["r2_key"])
+        except Exception:
+            logger.exception("download failed for %s", f.get("r2_key"))
+            continue
+        await client.send_document(
+            chat_id,
+            data,
+            filename=f.get("filename") or "file.bin",
+            caption=caption if not photos else None,
+        )
+
+
+async def send_expiry_digest(db: AsyncSession) -> None:
+    """Send the daily morning digest of upcoming document expirations."""
+    today = date.today()
+    deadline = today + timedelta(days=settings.expiry_window_days)
+    result = await db.execute(
+        select(Document)
+        .where(
+            Document.status == "active",
+            Document.expires_at.is_not(None),
+            Document.expires_at >= today,
+            Document.expires_at <= deadline,
+        )
+        .order_by(Document.expires_at)
+    )
+    docs = result.scalars().all()
+    if not docs:
+        return
+
+    person_ids = {d.owner_person_id for d in docs if d.owner_person_id is not None}
+    persons: dict[int, str] = {}
+    if person_ids:
+        person_rows = await db.execute(
+            select(Person.id, Person.full_name).where(Person.id.in_(person_ids))
+        )
+        for pid, name in person_rows.all():
+            persons[pid] = name
+
+    lines = [f"⏰ <b>Скоро истекают</b> ({len(docs)})", ""]
+    button_rows: list[list[dict[str, str]]] = []
+    for d in docs:
+        owner = persons.get(d.owner_person_id) if d.owner_person_id else None
+        days_left = (d.expires_at - today).days if d.expires_at else None
+        when = d.expires_at.strftime("%d.%m.%Y") if d.expires_at else "—"
+        owner_part = f" · {owner}" if owner else ""
+        days_part = f" ({days_left} дн)" if days_left is not None else ""
+        lines.append(f"• <b>{d.title}</b>{owner_part} — {when}{days_part}")
+        button_rows.append(
+            [
+                {
+                    "text": f"📨 Прислать «{d.title[:40]}»",
+                    "callback_data": f"send_doc_{d.id}",
+                }
+            ]
+        )
+
+    keyboard = client.make_inline_keyboard(button_rows)
+    await send_text(settings.telegram_chat_id, "\n".join(lines), keyboard=keyboard)

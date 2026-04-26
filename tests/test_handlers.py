@@ -1,235 +1,315 @@
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from bot import handlers
+from config import settings
 from database import Base
+from models import Document, Person
+from modules import ingest, search, state
 
 
-@pytest.fixture
-async def db_session() -> AsyncSession:
+@pytest.fixture()
+async def session() -> AsyncSession:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with session_factory() as session:
-        yield session
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        yield s
     await engine.dispose()
 
 
-@patch("bot.handlers.notifications.send_message", new_callable=AsyncMock)
-async def test_start_command_sends_greeting(
-    mock_send: AsyncMock,
-    db_session: AsyncSession,
-) -> None:
-    from bot.handlers import handle_update
-
-    update = {"message": {"text": "/start", "from": {"id": 123}}}
-    await handle_update(update, db_session)
-
-    mock_send.assert_called_once()
-    call_args = mock_send.call_args[0][0]
-    assert "Life Admin Agent" in call_args
-
-
-@patch("bot.handlers.ingestion.process_text", new_callable=AsyncMock)
-async def test_text_message_calls_ingestion(
-    mock_process: AsyncMock,
-    db_session: AsyncSession,
-) -> None:
-    from bot.handlers import handle_update
-
-    mock_process.return_value = MagicMock(id=1)
-    update = {"message": {"text": "Сертификат на массаж"}}
-    await handle_update(update, db_session)
-
-    mock_process.assert_called_once_with("Сертификат на массаж", db_session)
-
-
-@patch("bot.client.answer_callback_query", new_callable=AsyncMock)
-async def test_ok_callback_answered(
-    mock_answer: AsyncMock,
-    db_session: AsyncSession,
-) -> None:
-    from bot.handlers import handle_update
-
-    update = {
-        "callback_query": {
-            "id": "abc123",
-            "data": "ok_42",
-            "from": {"id": 123},
+def _msg(text: str) -> dict[str, Any]:
+    return {
+        "message": {
+            "chat": {"id": settings.telegram_chat_id},
+            "text": text,
         }
     }
-    await handle_update(update, db_session)
-    mock_answer.assert_called_once_with("abc123", text="✅ Сохранено")
 
 
-@patch("bot.handlers.notifications.send_message", new_callable=AsyncMock)
-@patch("bot.client.answer_callback_query", new_callable=AsyncMock)
-async def test_attach_callback_sends_prompt(
-    mock_answer: AsyncMock,
-    mock_send: AsyncMock,
-    db_session: AsyncSession,
-) -> None:
-    from bot.handlers import handle_update
-
-    update = {
+def _cb(data: str) -> dict[str, Any]:
+    return {
         "callback_query": {
-            "id": "cb1",
-            "data": "attach_7",
-            "from": {"id": 123},
+            "id": "cb-1",
+            "data": data,
+            "message": {"chat": {"id": settings.telegram_chat_id}},
         }
     }
-    await handle_update(update, db_session)
-    mock_answer.assert_called_once()
-    mock_send.assert_called_once()
-    assert "#7" in mock_send.call_args[0][0]
 
 
-@patch("bot.handlers.notifications.send_message", new_callable=AsyncMock)
-@patch("bot.client.answer_callback_query", new_callable=AsyncMock)
-async def test_edit_callback_sets_pending_state(
-    mock_answer: AsyncMock,
-    mock_send: AsyncMock,
-    db_session: AsyncSession,
-) -> None:
-    import bot.handlers as handlers
-
-    handlers._pending_edit_entity_id = None
-    update = {
-        "callback_query": {
-            "id": "cb_edit",
-            "data": "edit_99",
-            "from": {"id": 123},
-        }
-    }
-    from bot.handlers import handle_update
-
-    await handle_update(update, db_session)
-    assert handlers._pending_edit_entity_id == 99
-    mock_send.assert_called_once()
-    assert "#99" in mock_send.call_args[0][0]
+# ---------------------------------------------------------------------------
+# /help and /list
+# ---------------------------------------------------------------------------
 
 
-@patch("bot.handlers.ingestion.process_edit", new_callable=AsyncMock)
-@patch("bot.handlers.ingestion.process_text", new_callable=AsyncMock)
-async def test_text_after_edit_callback_calls_process_edit(
-    mock_process_text: AsyncMock,
-    mock_process_edit: AsyncMock,
-    db_session: AsyncSession,
-) -> None:
-    import bot.handlers as handlers
+async def test_help_command_sends_text(session: AsyncSession) -> None:
+    captured: list[str] = []
 
-    handlers._pending_edit_entity_id = 99
-    update = {"message": {"text": "перенеси на 20 сентября"}}
-    from bot.handlers import handle_update
+    async def fake_send(chat_id: int, text: str, keyboard: Any = None) -> None:
+        captured.append(text)
 
-    await handle_update(update, db_session)
-    mock_process_edit.assert_called_once_with(99, "перенеси на 20 сентября", db_session)
-    mock_process_text.assert_not_called()
-    assert handlers._pending_edit_entity_id is None
+    with patch("bot.handlers.notifications.send_text", fake_send):
+        await handlers.handle_update(_msg("/help"), session)
+    assert captured
+    assert "Хранилище" in captured[0]
 
 
-@patch("bot.handlers.notifications.send_message", new_callable=AsyncMock)
-async def test_generate_clarifying_question_sets_pending_state(
-    mock_send: AsyncMock,
-    db_session: AsyncSession,
-) -> None:
-    """If generate_text returns a question, pending state is saved for next message."""
-    import bot.handlers as handlers
+async def test_list_empty(session: AsyncSession) -> None:
+    captured: list[str] = []
 
-    handlers._pending_generate_request = None
+    async def fake_send(chat_id: int, text: str, keyboard: Any = None) -> None:
+        captured.append(text)
+
+    with patch("bot.handlers.notifications.send_text", fake_send):
+        await handlers.handle_update(_msg("/list"), session)
+    assert "пустое" in captured[0]
+
+
+async def test_list_with_record(session: AsyncSession) -> None:
+    p = Person(full_name="Anna", relation="жена")
+    session.add(p)
+    await session.commit()
+
+    captured: list[str] = []
+
+    async def fake_send(chat_id: int, text: str, keyboard: Any = None) -> None:
+        captured.append(text)
+
+    with patch("bot.handlers.notifications.send_text", fake_send):
+        await handlers.handle_update(_msg("/list"), session)
+    assert "Anna" in captured[0]
+
+
+# ---------------------------------------------------------------------------
+# /get and /delete
+# ---------------------------------------------------------------------------
+
+
+async def test_get_returns_record(session: AsyncSession) -> None:
+    p = Person(full_name="Anna", relation="жена")
+    session.add(p)
+    await session.commit()
+
+    captured: list[str] = []
+
+    async def fake_send(chat_id: int, text: str, keyboard: Any = None) -> None:
+        captured.append(text)
+
+    async def fake_send_files(*args: Any, **kwargs: Any) -> None:
+        return None
 
     with (
-        patch("modules.parser.detect_intent", return_value="generate"),
-        patch(
-            "modules.reference.generate_text",
-            new=AsyncMock(
-                return_value="У тебя несколько машин, уточни: какую именно использовать?"
-            ),
-        ),
+        patch("bot.handlers.notifications.send_text", fake_send),
+        patch("bot.handlers.notifications.send_files", fake_send_files),
     ):
-        update = {"message": {"text": "напиши пропуск для машины"}}
-        from bot.handlers import handle_update
+        await handlers.handle_update(_msg(f"/get person_{p.id}"), session)
 
-        await handle_update(update, db_session)
-
-    assert handlers._pending_generate_request == "напиши пропуск для машины"
-    mock_send.assert_called_once()
+    assert "Anna" in captured[0]
 
 
-@patch("bot.handlers.notifications.send_message", new_callable=AsyncMock)
-async def test_generate_no_question_does_not_set_pending_state(
-    mock_send: AsyncMock,
-    db_session: AsyncSession,
-) -> None:
-    """If generate_text returns a final text (no ?), pending state stays None."""
-    import bot.handlers as handlers
+async def test_delete_removes_record(session: AsyncSession) -> None:
+    p = Person(full_name="Anna", relation="жена")
+    session.add(p)
+    await session.commit()
+    pid = p.id
 
-    handlers._pending_generate_request = None
+    captured: list[str] = []
+
+    async def fake_send(chat_id: int, text: str, keyboard: Any = None) -> None:
+        captured.append(text)
 
     with (
-        patch("modules.parser.detect_intent", return_value="generate"),
+        patch("bot.handlers.notifications.send_text", fake_send),
+        patch("bot.handlers.storage.delete_file"),
+    ):
+        await handlers.handle_update(_msg(f"/delete person_{pid}"), session)
+
+    assert "Удалил" in captured[0]
+    assert await session.get(Person, pid) is None
+
+
+async def test_unauthorised_chat_ignored(session: AsyncSession) -> None:
+    captured: list[str] = []
+
+    async def fake_send(chat_id: int, text: str, keyboard: Any = None) -> None:
+        captured.append(text)
+
+    update = {
+        "message": {
+            "chat": {"id": settings.telegram_chat_id + 1},
+            "text": "/help",
+        }
+    }
+    with patch("bot.handlers.notifications.send_text", fake_send):
+        await handlers.handle_update(update, session)
+    assert captured == []
+
+
+# ---------------------------------------------------------------------------
+# Text routing — query path
+# ---------------------------------------------------------------------------
+
+
+async def test_text_query_path_runs_search(session: AsyncSession) -> None:
+    p = Person(full_name="Anna", relation="жена")
+    session.add(p)
+    await session.flush()
+    d = Document(kind="passport", title="Паспорт", owner_person_id=p.id, status="active")
+    session.add(d)
+    await session.commit()
+
+    captured: list[str] = []
+
+    async def fake_send(chat_id: int, text: str, keyboard: Any = None) -> None:
+        captured.append(text)
+
+    async def fake_send_files(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    classified_query = {"intent": "query", "ingest": None, "query": "пришли паспорт"}
+    retrieve_result = search.RetrieveResult(
+        ids=[{"type": "document", "id": d.id}], action="send_text"
+    )
+
+    with (
+        patch("bot.handlers.notifications.send_text", fake_send),
+        patch("bot.handlers.notifications.send_files", fake_send_files),
         patch(
-            "modules.reference.generate_text",
-            new=AsyncMock(return_value="Прошу оформить пропуск на Тойота Камри А123БВ777"),
+            "modules.ingest._classify",
+            AsyncMock(return_value=classified_query),
+        ),
+        patch(
+            "modules.search.resolve_query",
+            AsyncMock(return_value=retrieve_result),
         ),
     ):
-        update = {"message": {"text": "напиши пропуск для машины"}}
-        from bot.handlers import handle_update
-
-        await handle_update(update, db_session)
-
-    assert handlers._pending_generate_request is None
+        await handlers.handle_update(_msg("пришли паспорт"), session)
+    assert any("Паспорт" in t for t in captured)
 
 
-@patch("bot.handlers.notifications.send_message", new_callable=AsyncMock)
-async def test_clarification_reply_combines_and_calls_generate(
-    mock_send: AsyncMock,
-    db_session: AsyncSession,
-) -> None:
-    """When _pending_generate_request is set, next message is combined and retried."""
-    import bot.handlers as handlers
+async def test_text_query_no_results(session: AsyncSession) -> None:
+    p = Person(full_name="Anna", relation="жена")
+    session.add(p)
+    await session.commit()
 
-    handlers._pending_generate_request = "напиши пропуск для машины"
+    captured: list[str] = []
 
-    with patch(
-        "modules.reference.generate_text",
-        new=AsyncMock(return_value="Прошу оформить пропуск на Тойота Камри А123БВ777"),
-    ) as mock_generate:
-        update = {"message": {"text": "Тойота Камри"}}
-        from bot.handlers import handle_update
+    async def fake_send(chat_id: int, text: str, keyboard: Any = None) -> None:
+        captured.append(text)
 
-        await handle_update(update, db_session)
-
-    mock_generate.assert_called_once()
-    combined_arg = mock_generate.call_args[0][0]
-    assert "напиши пропуск для машины" in combined_arg
-    assert "Тойота Камри" in combined_arg
-    assert handlers._pending_generate_request is None
+    classified = {"intent": "query", "ingest": None, "query": "x"}
+    rresult = search.RetrieveResult(ids=[], action="send_text")
+    with (
+        patch("bot.handlers.notifications.send_text", fake_send),
+        patch("modules.ingest._classify", AsyncMock(return_value=classified)),
+        patch("modules.search.resolve_query", AsyncMock(return_value=rresult)),
+    ):
+        await handlers.handle_update(_msg("где паспорт"), session)
+    assert any("Ничего не нашёл" in t for t in captured)
 
 
-@patch("bot.client.get_file", new_callable=AsyncMock)
-@patch("bot.client.download_file", new_callable=AsyncMock)
-@patch("modules.ingestion.process_file", new_callable=AsyncMock)
-@patch("bot.handlers.notifications.send_message", new_callable=AsyncMock)
-async def test_photo_message_triggers_process_file(
-    mock_send: AsyncMock,
-    mock_process_file: AsyncMock,
-    mock_download: AsyncMock,
-    mock_get_file: AsyncMock,
-    db_session: AsyncSession,
-) -> None:
-    from bot.handlers import handle_update
+# ---------------------------------------------------------------------------
+# Callback router
+# ---------------------------------------------------------------------------
 
-    mock_get_file.return_value = {"result": {"file_path": "photos/file_abc.jpg"}}
-    mock_download.return_value = b"fake-image-bytes"
-    mock_process_file.return_value = None
 
-    update = {"message": {"photo": [{"file_id": "abc", "file_size": 1024}]}}
-    await handle_update(update, db_session)
+async def test_callback_verify_ok(session: AsyncSession) -> None:
+    p = Person(full_name="Anna", relation="жена")
+    session.add(p)
+    await session.commit()
+    draft = {
+        "type": "document",
+        "kind": "snils",
+        "owner_relation": "жена",
+        "owner_full_name": "Anna",
+        "fields": {},
+        "tags": ["снилс"],
+        "suggested_title": "СНИЛС",
+        "files": [],
+    }
+    await state.set_state(
+        session, settings.telegram_chat_id, "awaiting_ocr_verification", {"draft": draft}
+    )
 
-    mock_process_file.assert_called_once()
-    mock_send.assert_called_once()
+    captured: list[str] = []
+
+    async def fake_send(chat_id: int, text: str, keyboard: Any = None) -> None:
+        captured.append(text)
+
+    async def noop(*a: Any, **kw: Any) -> None:
+        return None
+
+    with (
+        patch("bot.handlers.notifications.send_text", fake_send),
+        patch("bot.handlers.client.answer_callback_query", AsyncMock()),
+    ):
+        await handlers.handle_update(_cb("verify_ok"), session)
+    assert any("Сохранил" in t for t in captured)
+
+
+async def test_callback_send_doc(session: AsyncSession) -> None:
+    p = Person(full_name="Anna", relation="жена")
+    session.add(p)
+    await session.flush()
+    d = Document(kind="passport", title="Паспорт", owner_person_id=p.id, status="active")
+    session.add(d)
+    await session.commit()
+
+    captured: list[str] = []
+
+    async def fake_send(chat_id: int, text: str, keyboard: Any = None) -> None:
+        captured.append(text)
+
+    async def noop(*a: Any, **kw: Any) -> None:
+        return None
+
+    with (
+        patch("bot.handlers.notifications.send_text", fake_send),
+        patch("bot.handlers.notifications.send_files", noop),
+        patch("bot.handlers.client.answer_callback_query", AsyncMock()),
+    ):
+        await handlers.handle_update(_cb(f"send_doc_{d.id}"), session)
+    assert any("Паспорт" in t for t in captured)
+
+
+# ---------------------------------------------------------------------------
+# Files path: photo + document
+# ---------------------------------------------------------------------------
+
+
+async def test_files_route_single_photo_starts_more_photos(session: AsyncSession) -> None:
+    captured: list[str] = []
+
+    async def fake_send(chat_id: int, text: str, keyboard: Any = None) -> None:
+        captured.append(text)
+
+    file_input = ingest.FileInput(b"img", "p.jpg", "image/jpeg")
+
+    async def fake_extract(_msg: dict[str, Any]) -> list[ingest.FileInput]:
+        return [file_input]
+
+    def fake_upload(files: list[ingest.FileInput], prefix: str) -> list[dict[str, Any]]:
+        return [{"r2_key": "x/1.jpg", "filename": "p.jpg", "content_type": "image/jpeg"}]
+
+    update = {
+        "message": {
+            "chat": {"id": settings.telegram_chat_id},
+            "photo": [{"file_id": "ph"}],
+        }
+    }
+    with (
+        patch("bot.handlers._extract_files", fake_extract),
+        patch("bot.handlers.notifications.send_text", fake_send),
+        patch("modules.ingest._upload_files_now", fake_upload),
+    ):
+        await handlers.handle_update(update, session)
+    assert any("1 фото" in t for t in captured)
+    bs = await state.get_state(session, settings.telegram_chat_id)
+    assert bs is not None
+    assert bs.state == "awaiting_more_photos"
