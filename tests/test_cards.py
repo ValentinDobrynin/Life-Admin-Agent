@@ -87,6 +87,93 @@ def test_render_verification_card_uses_passport_type_in_title() -> None:
     assert "Внутренний паспорт" in text2
 
 
+def test_render_ticket_transport_card() -> None:
+    draft = {
+        "type": "document",
+        "kind": "ticket",
+        "fields": {
+            "category": "transport",
+            "subtype": "train",
+            "carrier_or_venue": "РЖД / ДОСС",
+            "from": "Москва",
+            "to": "Санкт-Петербург",
+            "departure_at": "2026-05-22T07:30",
+            "arrival_at": "2026-05-22T11:45",
+            "round_trip": True,
+            "return_departure_at": "2026-05-24T21:00",
+            "return_arrival_at": "2026-05-25T01:08",
+            "train_number": "758",
+            "order_number": "73564554567043",
+            "price_total": 51424.60,
+            "currency": "RUB",
+            "passengers": [
+                {"full_name": "Добрынин Валентин", "passport": "4505997513", "seat": "01/027"},
+                {"full_name": "Добрынина Анастасия", "passport": "4525645062", "seat": "01/029"},
+                {"full_name": "Раскоснов Максим", "passport": "4525581686", "seat": "01/030"},
+            ],
+        },
+        "tags": ["билет", "ticket", "сапсан"],
+        "suggested_title": "Сапсан · Москва ↔ СПб · 22–25.05.2026",
+        "files": [{"r2_key": "k", "filename": "tickets.pdf", "content_type": "application/pdf"}],
+    }
+    text = cards.render_verification_card(draft)
+    assert "🚆" in text
+    assert "<b>Сапсан · Москва ↔ СПб · 22–25.05.2026</b>" in text
+    assert "Откуда:" in text and "Москва" in text
+    assert "Куда:" in text and "Санкт-Петербург" in text
+    assert "Туда-обратно: да" in text
+    assert "Пассажиры:" in text
+    assert "Добрынин Валентин" in text
+    assert "Раскоснов Максим" in text
+    assert "Файлы: 1 PDF" in text
+
+
+def test_render_ticket_event_fallback_title() -> None:
+    """Event tickets without suggested_title get a built-in fallback."""
+    draft = {
+        "type": "document",
+        "kind": "ticket",
+        "fields": {
+            "category": "event",
+            "subtype": "concert",
+            "carrier_or_venue": "Rammstein",
+            "venue": "Лужники",
+            "event_at": "2026-07-20T20:00",
+            "passengers": [{"full_name": "Валентин", "seat": "A-12"}],
+        },
+        "tags": ["билет", "ticket", "концерт"],
+        "files": [],
+    }
+    text = cards.render_verification_card(draft)
+    assert "🎤" in text
+    assert "Rammstein" in text
+    assert "20.07.2026" in text
+    assert "Пассажиры:" in text
+
+
+def test_render_ticket_record_card_skips_top_level_dates() -> None:
+    """Top-level 'Срок до'/'Выдан' не должны мешать билетам — даты и так в полях."""
+    rec = {
+        "id": 5,
+        "kind": "ticket",
+        "title": "Сапсан · МСК↔СПб",
+        "expires_at": "2026-05-25",
+        "fields": {
+            "category": "transport",
+            "subtype": "train",
+            "from": "Москва",
+            "to": "Санкт-Петербург",
+            "departure_at": "2026-05-22T07:30",
+            "passengers": [{"full_name": "Иванов"}],
+        },
+        "tags": ["билет"],
+        "files": [],
+    }
+    text = cards.render_record_card("document", rec)
+    assert "Срок до:" not in text
+    assert "Отправление:" in text
+
+
 def test_html_escape() -> None:
     draft = {
         "type": "person",

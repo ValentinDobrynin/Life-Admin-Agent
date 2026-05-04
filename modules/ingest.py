@@ -113,7 +113,7 @@ async def _classify(text: str, ocr_text: str, db: AsyncSession) -> dict[str, Any
     except json.JSONDecodeError:
         logger.exception("classify returned non-JSON: %s", content[:200])
         return {"intent": "query", "ingest": None, "query": text}
-    return _normalise_ingest(parsed)
+    return _normalise_ingest(parsed, ocr_text=ocr_text)
 
 
 async def _patch(draft: dict[str, Any], phrase: str) -> dict[str, Any]:
@@ -219,6 +219,175 @@ def _normalise_owner_relation(value: Any) -> str | None:
     return None
 
 
+_TICKET_SIGNAL_PATTERNS: tuple[str, ...] = (
+    "электронный билет",
+    "контрольный купон",
+    "boarding pass",
+    "e-ticket",
+    "поезд",
+    "вагон",
+    "перевозчик",
+    "сапсан",
+    "фпк",
+    "досс",
+    "ржд",
+    "аэрофлот",
+    " s7 ",
+    "pobeda",
+    "utair",
+    "lufthansa",
+    "emirates",
+    "flight ",
+    "рейс ",
+    "gate ",
+    "terminal ",
+    "check-in",
+    "концерт",
+    "матч",
+    "сектор",
+    "газпром арена",
+    "стадион",
+    "арена",
+    "спектакль",
+    "сеанс",
+)
+
+
+def _has_ticket_signals(ocr_text: str | None) -> bool:
+    """True if OCR contains at least 2 ticket indicators. Conservative: needs
+    two matches to avoid triggering on random mentions of 'поезд'."""
+    if not ocr_text:
+        return False
+    haystack = ocr_text.lower()
+    hits = 0
+    for pattern in _TICKET_SIGNAL_PATTERNS:
+        if pattern in haystack:
+            hits += 1
+            if hits >= 2:
+                return True
+    return False
+
+
+_ALLOWED_TICKET_CATEGORIES: frozenset[str] = frozenset({"transport", "event"})
+
+_ALLOWED_TICKET_SUBTYPES: frozenset[str] = frozenset(
+    {
+        "train",
+        "plane",
+        "bus",
+        "ferry",
+        "concert",
+        "sport",
+        "theatre",
+        "cinema",
+        "museum",
+        "other",
+    }
+)
+
+_TICKET_SUBTYPE_SYNONYMS: dict[str, str] = {
+    "поезд": "train",
+    "электричка": "train",
+    "train": "train",
+    "rail": "train",
+    "самолёт": "plane",
+    "самолет": "plane",
+    "plane": "plane",
+    "flight": "plane",
+    "aircraft": "plane",
+    "авиа": "plane",
+    "автобус": "bus",
+    "bus": "bus",
+    "coach": "bus",
+    "паром": "ferry",
+    "ferry": "ferry",
+    "boat": "ferry",
+    "концерт": "concert",
+    "concert": "concert",
+    "матч": "sport",
+    "sport": "sport",
+    "футбол": "sport",
+    "хоккей": "sport",
+    "баскетбол": "sport",
+    "театр": "theatre",
+    "theatre": "theatre",
+    "theater": "theatre",
+    "спектакль": "theatre",
+    "кино": "cinema",
+    "cinema": "cinema",
+    "movie": "cinema",
+    "музей": "museum",
+    "museum": "museum",
+    "выставка": "museum",
+    "exhibition": "museum",
+}
+
+_TRANSPORT_SUBTYPES: frozenset[str] = frozenset({"train", "plane", "bus", "ferry"})
+
+
+def _normalise_ticket_subtype(value: Any) -> str | None:
+    if value is None:
+        return None
+    s = str(value).strip().lower()
+    if not s or s in {"null", "none", "—", "-"}:
+        return None
+    if s in _ALLOWED_TICKET_SUBTYPES:
+        return s
+    return _TICKET_SUBTYPE_SYNONYMS.get(s)
+
+
+def _infer_ticket_category(subtype: str | None) -> str | None:
+    if subtype in _TRANSPORT_SUBTYPES:
+        return "transport"
+    if subtype in _ALLOWED_TICKET_SUBTYPES:
+        return "event"
+    return None
+
+
+def _ticket_expires_hint(fields: dict[str, Any]) -> str | None:
+    """Pick the latest trip/event date from ticket fields as expires_at candidate.
+
+    Priority: return_arrival_at > arrival_at > departure_at > event_at.
+    Returns ISO date string (YYYY-MM-DD) or None.
+    """
+    for key in ("return_arrival_at", "arrival_at", "departure_at", "event_at"):
+        value = fields.get(key)
+        if not value:
+            continue
+        s = str(value)
+        if len(s) >= 10:
+            return s[:10]
+    return None
+
+
+def _augment_ticket_fields(ingest: dict[str, Any]) -> None:
+    """Normalise ticket subtype/category and precompute expires_at hint."""
+    if ingest.get("type") != "document" or ingest.get("kind") != "ticket":
+        return
+    fields = ingest.get("fields")
+    if not isinstance(fields, dict):
+        return
+
+    fields.pop("passport_type", None)
+
+    subtype = _normalise_ticket_subtype(fields.get("subtype"))
+    fields["subtype"] = subtype
+
+    category_raw = fields.get("category")
+    category = (
+        category_raw
+        if isinstance(category_raw, str) and category_raw in _ALLOWED_TICKET_CATEGORIES
+        else None
+    )
+    if category is None:
+        category = _infer_ticket_category(subtype)
+    fields["category"] = category
+
+    hint = _ticket_expires_hint(fields)
+    if hint is not None:
+        fields["_expires_at_hint"] = hint
+
+
 _ALLOWED_PASSPORT_TYPES: frozenset[str] = frozenset({"internal", "foreign"})
 
 _PASSPORT_TYPE_SYNONYMS: dict[str, str] = {
@@ -283,17 +452,74 @@ def _augment_passport_fields(ingest: dict[str, Any]) -> None:
     fields["passport_type"] = norm
 
 
-def _normalise_ingest(payload: dict[str, Any]) -> dict[str, Any]:
+def _override_passport_to_ticket_if_needed(ingest: dict[str, Any], ocr_text: str | None) -> None:
+    """If LLM returned kind=passport but OCR contains ticket signals, override
+    to kind=ticket and drop passport-only fields. This is a safety net for
+    PDFs where passenger-passport lines trick the classifier.
+    """
+    if ingest.get("type") != "document" or ingest.get("kind") != "passport":
+        return
+    if not _has_ticket_signals(ocr_text):
+        return
+
+    logger.warning(
+        "overriding kind=passport → ticket because OCR has ticket signals; "
+        "passport fields will be dropped"
+    )
+    ingest["kind"] = "ticket"
+    fields = ingest.get("fields")
+    if isinstance(fields, dict):
+        passport_number = fields.get("number") or fields.get("series")
+        passport_name = fields.get("full_name")
+        for key in (
+            "passport_type",
+            "series",
+            "issued_by",
+            "country",
+        ):
+            fields.pop(key, None)
+
+        passengers = fields.get("passengers")
+        if not isinstance(passengers, list):
+            passengers = []
+            if passport_name or passport_number:
+                passengers.append(
+                    {
+                        k: v
+                        for k, v in {
+                            "full_name": passport_name,
+                            "passport": str(passport_number) if passport_number else None,
+                        }.items()
+                        if v
+                    }
+                )
+            fields["passengers"] = passengers
+
+        for key in ("number", "full_name"):
+            fields.pop(key, None)
+
+    existing_title = ingest.get("suggested_title") or ""
+    if "паспорт" in existing_title.lower() or existing_title.strip() == "":
+        ingest["suggested_title"] = "Билет"
+
+
+def _normalise_ingest(
+    payload: dict[str, Any],
+    ocr_text: str | None = None,
+) -> dict[str, Any]:
     """Sanitise an ingest dict in place (and return it). Currently:
 
+    * overrides kind=passport → ticket when OCR has ticket signals,
     * normalises ``owner_relation`` to canonical Russian enum,
     * normalises ``fields.passport_type`` to ``"internal"|"foreign"|null``,
-    * if passport_type is missing, auto-detects from series/number format.
+    * if passport_type is missing, auto-detects from series/number format,
+    * validates ticket category/subtype and precomputes expires_at hint.
     """
     if not isinstance(payload, dict):
         return payload
     ingest = payload.get("ingest") if "ingest" in payload else payload
     if isinstance(ingest, dict):
+        _override_passport_to_ticket_if_needed(ingest, ocr_text)
         if "owner_relation" in ingest:
             before = ingest.get("owner_relation")
             after = _normalise_owner_relation(before)
@@ -301,6 +527,7 @@ def _normalise_ingest(payload: dict[str, Any]) -> dict[str, Any]:
                 logger.info("normalised owner_relation: %r -> %r", before, after)
             ingest["owner_relation"] = after
         _augment_passport_fields(ingest)
+        _augment_ticket_fields(ingest)
     return payload
 
 
@@ -414,15 +641,28 @@ async def _save_record(
     if record_type == "document":
         kind = draft.get("kind") or "other"
         kind_set = {kind, "паспорт"} if kind == "passport" else {kind}
+        if kind == "ticket":
+            kind_set |= {"билет", "ticket"}
         merged_tags = list({*tags, *kind_set, _eng_to_ru(kind), _ru_to_eng(kind)})
         merged_tags = [t for t in merged_tags if t]
+
+        doc_owner_id = None if kind == "ticket" else owner_person_id
+
+        issued_at = _parse_date(fields.get("issued_at"))
+        expires_at = _parse_date(fields.get("expires_at"))
+        if kind == "ticket":
+            issued_at = None
+            hint = fields.get("_expires_at_hint") or _ticket_expires_hint(fields)
+            if hint:
+                expires_at = _parse_date(hint)
+            fields.pop("_expires_at_hint", None)
 
         d = Document(
             kind=kind,
             title=title or kind,
-            owner_person_id=owner_person_id,
-            issued_at=_parse_date(fields.get("issued_at")),
-            expires_at=_parse_date(fields.get("expires_at")),
+            owner_person_id=doc_owner_id,
+            issued_at=issued_at,
+            expires_at=expires_at,
             status="active",
             fields=fields,
             tags=merged_tags,
@@ -518,6 +758,8 @@ async def _find_duplicate(
     db: AsyncSession, kind: str, owner_person_id: int | None
 ) -> Document | None:
     if not kind or owner_person_id is None:
+        return None
+    if kind == "ticket":
         return None
     result = await db.execute(
         select(Document).where(

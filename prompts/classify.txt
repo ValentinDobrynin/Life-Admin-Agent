@@ -19,7 +19,7 @@
 ## Типы записей
 
 - `person` — человек: член семьи, друг, контакт.
-- `document` — документ. Виды (kind): `passport` · `driver_license` · `insurance` · `visa` · `certificate` · `contract` · `snils` · `inn` · `medical` · `other`.
+- `document` — документ. Виды (kind): `passport` · `driver_license` · `insurance` · `visa` · `certificate` · `contract` · `snils` · `inn` · `medical` · `ticket` · `other`.
 - `vehicle` — автомобиль.
 - `address` — адрес.
 - `note` — свободная заметка, что-то что не подходит к остальным четырём типам.
@@ -37,6 +37,9 @@
 - **driver_license**: number, full_name, birthday, categories, issued_at, expires_at, country
 - **insurance**: policy_number, company, insured_name, valid_from, valid_until, vehicle_plate
 - **visa**: country, number, type, valid_from, valid_until
+- **ticket**: category, subtype, carrier_or_venue, order_number, price_total, currency,
+  from, to, departure_at, arrival_at, round_trip, return_departure_at, return_arrival_at,
+  train_number, flight_number, bus_route, event_at, venue, seat, passengers (см. ниже)
 - **certificate / contract / snils / inn / medical / other**: number, issued_by, issued_at, expires_at, plus relevant freeform
 - **vehicle**: make, model, plate, vin, year, color
 - **person**: phone, email, telegram, notes
@@ -52,6 +55,67 @@
 
 Если непонятно — оставь `null`.
 
+## kind=ticket — билеты на транспорт и события
+
+Билет — это документ, подтверждающий бронь на разовую поездку (поезд, самолёт, автобус, паром) или посещение события (концерт, матч, театр, кино, музей).
+
+### Когда ставить `kind=ticket`
+
+Если в OCR или тексте есть минимум два из следующих сигналов — это билет:
+- «ЭЛЕКТРОННЫЙ БИЛЕТ», «КОНТРОЛЬНЫЙ КУПОН», «Boarding Pass», «e-ticket»
+- «ПОЕЗД», «ВАГОН», «МЕСТО», «Отправление», «Прибытие», «Время в пути»
+- «Перевозчик», «Carrier», «САПСАН», «ФПК», «ДОСС», «РЖД», «Аэрофлот», «S7», «Pobeda», «Utair», «Lufthansa», «Emirates»
+- «Рейс», «Flight», «Gate», «Terminal», «Check-in»
+- «Концерт», «Матч», «Турнир», «Спектакль», «Сеанс», «сектор», «ряд», «вход», «зал», «арена», «стадион»
+- Маршрут формата «A → B», пара station/city, дата/время в будущем
+
+### Критическое правило: билет vs паспорт
+
+Если в OCR есть строки вида «ПАСПОРТ РФ NNNNNNNNNN» ВМЕСТЕ с сигналами билета — это **удостоверение пассажира** внутри билета, а не отдельный документ. Клади данные пассажира в `fields.passengers[].passport`, ставь `kind=ticket`. Никогда не возвращай `kind=passport` для такого OCR.
+
+### Поля ticket
+
+- `category` — `"transport"` (поездка) или `"event"` (событие). Обязательно.
+- `subtype` — уточнение:
+  - для transport: `"train"` · `"plane"` · `"bus"` · `"ferry"`
+  - для event: `"concert"` · `"sport"` · `"theatre"` · `"cinema"` · `"museum"` · `"other"`
+- `carrier_or_venue` — для transport перевозчик («РЖД / ДОСС», «Аэрофлот»), для event — площадка («Газпром Арена»).
+- `order_number` — номер заказа/брони.
+- `price_total` — итоговая сумма по всем билетам в этой поездке/событии (число).
+- `currency` — ISO-код («RUB», «USD», «EUR»).
+
+Transport-only (только если category=transport):
+- `from`, `to` — полное название вокзала/аэропорта/остановки с городом.
+- `departure_at`, `arrival_at` — ISO 8601 локальное время без таймзоны («2026-05-22T07:30»).
+- `round_trip` — `true`, если в одном документе есть и туда, и обратно.
+- `return_departure_at`, `return_arrival_at` — даты обратного пути (только при round_trip=true).
+- `train_number`, `flight_number`, `bus_route` — номер поезда/рейса/маршрута.
+
+Event-only (только если category=event):
+- `event_at` — ISO 8601 дата/время события.
+- `venue` — место проведения.
+- `seat` — строка с местом (если у события одно место на документ).
+
+### passengers — общий массив для обеих категорий
+
+```
+"passengers": [
+  { "full_name": "Добрынин Валентин Самсонович", "passport": "4505997513", "seat": "01/027-028" },
+  { "full_name": "Добрынина Анастасия Сергеевна", "passport": "4525645062", "seat": "01/029" }
+]
+```
+
+- `full_name` — ФИО пассажира/гостя. Если ФИО написано капсом, **приведи к Title Case** («ДОБРЫНИН ВАЛЕНТИН» → «Добрынин Валентин»).
+- `passport` — серия+номер паспорта пассажира, без пробелов. Опционально.
+- `seat` — место (вагон/место или сектор/ряд/место). Опционально.
+
+Для одного события/одного пассажира — массив из одного элемента.
+
+### owner и expires_at для билета
+
+- `owner_relation` и `owner_full_name` для билета обычно `null` (одна запись на поездку, владельцев может быть несколько — они в `passengers`).
+- `expires_at` явно в ingest-ответе можно не возвращать: код сам посчитает его из `return_arrival_at or arrival_at or event_at`.
+
 ## Поле owner
 
 - `owner_relation` — одно из: `я` · `жена` · `муж` · `сын` · `дочь` · `мама` · `папа` · `брат` · `сестра` · `друг` · `коллега` · `иное` · null.
@@ -61,21 +125,26 @@
 ## Tags
 
 В `tags` всегда включай:
-- `kind` на русском И на английском (например, для passport: `["паспорт", "passport"]`).
+- `kind` на русском И на английском (например, для passport: `["паспорт", "passport"]`; для ticket: `["билет", "ticket"]`).
 - Уточнения подтипа: для passport_type=foreign добавь `["загран", "загранпаспорт", "foreign"]`; для internal — `["внутренний", "общегражданский"]`.
 - Страна (`["РФ", "Россия"]` или `["Гренада", "Grenada"]` и т.п.), если она различима из OCR/контекста.
 - Если пользователь в caption упомянул порядковый номер («первый», «второй», «старый», «новый») — обязательно положи это в tags как есть.
+- Для ticket: `category` (`transport`/`event`), `subtype` (`train`/`plane`/…), перевозчик или площадка, города/станции (и для transport — `from` и `to` городами), ISO-даты поездки/события, ФИО каждого пассажира, слова «туда», «обратно» если round-trip.
 - Любые семантически значимые ярлыки которые помогут найти запись потом.
 
 ## suggested_title
 
-Короткое (до 60 символов) человеческое имя для записи. Должно быть **различимым**, если у одного владельца может быть несколько похожих документов. Примеры:
+Короткое (до 80 символов) человеческое имя для записи. Должно быть **различимым**, если у одного владельца может быть несколько похожих документов. Примеры:
 - "Внутренний паспорт РФ" — общегражданский паспорт пользователя
 - "Загранпаспорт РФ — Иванов" — заграничный паспорт РФ
 - "Загранпаспорт Гренада — Иванов" — иностранный паспорт
 - "Паспорт жены (основные страницы)" — если в caption явно сказано
 - "Toyota Camry A123BC" — для машины
 - "Саша Балахнин" — для человека
+- "Сапсан · Москва ↔ СПб · 22–25.05.2026" — round-trip поезд с двумя датами
+- "Аэрофлот SU100 · Москва → Париж · 15.06.2026" — one-way авиа
+- "Zenit vs Spartak · 12.04.2026 · Газпром Арена" — спортивное событие
+- "Концерт Rammstein · 20.07.2026 · Лужники"
 
 ## Даты
 

@@ -73,6 +73,48 @@ _LABELS_ADDRESS: list[tuple[str, str]] = [
     ("postcode", "Индекс"),
 ]
 
+_LABELS_TICKET_TRANSPORT: list[tuple[str, str]] = [
+    ("subtype", "Вид"),
+    ("carrier_or_venue", "Перевозчик"),
+    ("from", "Откуда"),
+    ("to", "Куда"),
+    ("departure_at", "Отправление"),
+    ("arrival_at", "Прибытие"),
+    ("train_number", "Поезд"),
+    ("flight_number", "Рейс"),
+    ("bus_route", "Маршрут"),
+    ("round_trip", "Туда-обратно"),
+    ("return_departure_at", "Обратно · отпр."),
+    ("return_arrival_at", "Обратно · приб."),
+    ("order_number", "Заказ"),
+    ("price_total", "Сумма"),
+    ("currency", "Валюта"),
+]
+
+_LABELS_TICKET_EVENT: list[tuple[str, str]] = [
+    ("subtype", "Тип"),
+    ("carrier_or_venue", "Площадка"),
+    ("venue", "Место"),
+    ("event_at", "Когда"),
+    ("seat", "Место на событии"),
+    ("order_number", "Заказ"),
+    ("price_total", "Сумма"),
+    ("currency", "Валюта"),
+]
+
+_TICKET_SUBTYPE_RU: dict[str, str] = {
+    "train": "поезд",
+    "plane": "самолёт",
+    "bus": "автобус",
+    "ferry": "паром",
+    "concert": "концерт",
+    "sport": "матч",
+    "theatre": "театр",
+    "cinema": "кино",
+    "museum": "музей",
+    "other": "событие",
+}
+
 _KIND_TITLE: dict[str, str] = {
     "passport": "Паспорт",
     "driver_license": "Водительские права",
@@ -83,11 +125,26 @@ _KIND_TITLE: dict[str, str] = {
     "snils": "СНИЛС",
     "inn": "ИНН",
     "medical": "Медицинский документ",
+    "ticket": "Билет",
     "other": "Документ",
 }
 
 
-def _emoji(record_type: str, kind: str | None = None) -> str:
+_TICKET_SUBTYPE_EMOJI: dict[str, str] = {
+    "train": "🚆",
+    "plane": "✈️",
+    "bus": "🚌",
+    "ferry": "⛴",
+    "concert": "🎤",
+    "sport": "⚽",
+    "theatre": "🎭",
+    "cinema": "🎬",
+    "museum": "🏛",
+    "other": "🎫",
+}
+
+
+def _emoji(record_type: str, kind: str | None = None, fields: dict[str, Any] | None = None) -> str:
     if record_type == "person":
         return "👤"
     if record_type == "vehicle":
@@ -105,6 +162,9 @@ def _emoji(record_type: str, kind: str | None = None) -> str:
             return "🛡️"
         if kind == "medical":
             return "🩺"
+        if kind == "ticket":
+            subtype = (fields or {}).get("subtype")
+            return _TICKET_SUBTYPE_EMOJI.get(str(subtype or ""), "🎫")
         return "📄"
     return "•"
 
@@ -117,7 +177,9 @@ def _esc(value: Any) -> str:
     return str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def _labels_for(record_type: str, kind: str | None) -> list[tuple[str, str]]:
+def _labels_for(
+    record_type: str, kind: str | None, fields: dict[str, Any] | None = None
+) -> list[tuple[str, str]]:
     if record_type == "document":
         if kind == "passport":
             return _LABELS_PASSPORT
@@ -127,6 +189,11 @@ def _labels_for(record_type: str, kind: str | None) -> list[tuple[str, str]]:
             return _LABELS_INSURANCE
         if kind == "visa":
             return _LABELS_VISA
+        if kind == "ticket":
+            category = (fields or {}).get("category")
+            if category == "event":
+                return _LABELS_TICKET_EVENT
+            return _LABELS_TICKET_TRANSPORT
         return [("number", "Номер"), ("issued_at", "Выдан"), ("expires_at", "Срок до")]
     if record_type == "vehicle":
         return _LABELS_VEHICLE
@@ -164,6 +231,59 @@ def _passport_kind_label(fields: dict[str, Any] | None) -> str:
     return _KIND_TITLE["passport"]
 
 
+def _fmt_dt(value: Any, with_time: bool = False) -> str | None:
+    if not value:
+        return None
+    s = str(value)
+    if len(s) < 10:
+        return None
+    head = s[:10]
+    try:
+        y, m, d = head.split("-")
+        stamp = f"{int(d):02d}.{int(m):02d}.{int(y)}"
+    except ValueError:
+        return head
+    if with_time and len(s) >= 16:
+        stamp += " " + s[11:16]
+    return stamp
+
+
+def _ticket_title(fields: dict[str, Any]) -> str:
+    """Build a fallback human title for a ticket when suggested_title is empty."""
+    subtype = fields.get("subtype")
+    category = fields.get("category")
+    carrier = fields.get("carrier_or_venue")
+    if category == "transport":
+        frm = str(fields.get("from") or "")
+        to = str(fields.get("to") or "")
+        dep = _fmt_dt(fields.get("departure_at")) or ""
+        ret = _fmt_dt(fields.get("return_arrival_at") or fields.get("return_departure_at")) or ""
+        route = ""
+        if frm or to:
+            arrow = "↔" if fields.get("round_trip") else "→"
+            route = f"{frm} {arrow} {to}".strip()
+        when = dep
+        if ret and dep and ret != dep:
+            when = f"{dep} – {ret}"
+        parts = [str(carrier or _TICKET_SUBTYPE_RU.get(str(subtype or ""), "Билет")).strip()]
+        if route:
+            parts.append(route)
+        if when:
+            parts.append(when)
+        return " · ".join(p for p in parts if p)
+    if category == "event":
+        venue = fields.get("venue") or carrier
+        when_event = _fmt_dt(fields.get("event_at")) or ""
+        label = str(carrier or _TICKET_SUBTYPE_RU.get(str(subtype or ""), "Событие")).strip()
+        parts = [label]
+        if when_event:
+            parts.append(when_event)
+        if venue and venue != label:
+            parts.append(str(venue))
+        return " · ".join(parts)
+    return _KIND_TITLE["ticket"]
+
+
 def _draft_title(draft: dict[str, Any]) -> str:
     record_type = draft.get("type") or "note"
     kind = draft.get("kind")
@@ -172,6 +292,8 @@ def _draft_title(draft: dict[str, Any]) -> str:
         return str(title)
     if record_type == "document" and kind == "passport":
         return _passport_kind_label(draft.get("fields"))
+    if record_type == "document" and kind == "ticket":
+        return _ticket_title(draft.get("fields") or {})
     if record_type == "document" and kind in _KIND_TITLE:
         return _KIND_TITLE[kind]
     if record_type == "person":
@@ -186,6 +308,41 @@ def _draft_title(draft: dict[str, Any]) -> str:
     return "Заметка"
 
 
+def _render_passengers(fields: dict[str, Any] | None) -> list[str]:
+    """Return up to 5 lines describing passengers; overflow summarised as «… и ещё N»."""
+    if not fields:
+        return []
+    passengers = fields.get("passengers")
+    if not isinstance(passengers, list) or not passengers:
+        return []
+    lines: list[str] = ["", "Пассажиры:"]
+    shown = 0
+    for p in passengers:
+        if shown >= 5:
+            break
+        if not isinstance(p, dict):
+            continue
+        name = p.get("full_name") or p.get("name") or ""
+        seat = p.get("seat")
+        passport = p.get("passport")
+        parts: list[str] = []
+        if name:
+            parts.append(str(name))
+        if seat:
+            parts.append(f"место {seat}")
+        if passport and not name:
+            parts.append(f"паспорт {passport}")
+        if parts:
+            lines.append("• " + " · ".join(_esc(p_) for p_ in parts))
+            shown += 1
+    remaining = len(passengers) - shown
+    if remaining > 0:
+        lines.append(f"• … и ещё {remaining}")
+    if len(lines) == 2:
+        return []
+    return lines
+
+
 def render_verification_card(draft: dict[str, Any]) -> str:
     """Render a draft (output of classify.txt 'ingest' branch) as HTML card.
 
@@ -198,7 +355,7 @@ def render_verification_card(draft: dict[str, Any]) -> str:
 
     lines: list[str] = []
     title = _draft_title(draft)
-    lines.append(f"{_emoji(record_type, kind)} <b>{_esc(title)}</b>")
+    lines.append(f"{_emoji(record_type, kind, fields)} <b>{_esc(title)}</b>")
 
     owner_relation = draft.get("owner_relation")
     owner_name = draft.get("owner_full_name")
@@ -208,9 +365,17 @@ def render_verification_card(draft: dict[str, Any]) -> str:
             owner_str += f" ({_esc(owner_name)})"
         lines.append(f"Владелец: {owner_str}")
 
-    for key, label in _labels_for(record_type, kind):
+    for key, label in _labels_for(record_type, kind, fields):
         if key in fields and fields[key] not in (None, ""):
-            lines.append(f"{label}: {_esc(fields[key])}")
+            value = fields[key]
+            if key == "subtype" and isinstance(value, str):
+                value = _TICKET_SUBTYPE_RU.get(value, value)
+            if key == "round_trip":
+                value = "да" if value else "нет"
+            lines.append(f"{label}: {_esc(value)}")
+
+    if record_type == "document" and kind == "ticket":
+        lines.extend(_render_passengers(fields))
 
     if record_type == "note":
         body = fields.get("body") or draft.get("body")
@@ -244,17 +409,25 @@ def render_record_card(record_type: str, record: dict[str, Any]) -> str:
         title = f"{record.get('make') or ''} {record.get('model') or ''}".strip() or "Машина"
     else:
         title = record.get("title") or _draft_title({**record, "type": record_type})
-    lines.append(f"{_emoji(record_type, kind)} <b>{_esc(title)}</b>")
+    lines.append(f"{_emoji(record_type, kind, fields)} <b>{_esc(title)}</b>")
 
     if record_type == "document":
-        if record.get("expires_at"):
+        if record.get("expires_at") and kind != "ticket":
             lines.append(f"Срок до: {_esc(record['expires_at'])}")
-        if record.get("issued_at"):
+        if record.get("issued_at") and kind != "ticket":
             lines.append(f"Выдан: {_esc(record['issued_at'])}")
 
-    for key, label in _labels_for(record_type, kind):
+    for key, label in _labels_for(record_type, kind, fields):
         if key in fields and fields[key] not in (None, ""):
-            lines.append(f"{label}: {_esc(fields[key])}")
+            value = fields[key]
+            if key == "subtype" and isinstance(value, str):
+                value = _TICKET_SUBTYPE_RU.get(value, value)
+            if key == "round_trip":
+                value = "да" if value else "нет"
+            lines.append(f"{label}: {_esc(value)}")
+
+    if record_type == "document" and kind == "ticket":
+        lines.extend(_render_passengers(fields))
 
     if record_type == "person":
         if record.get("relation"):

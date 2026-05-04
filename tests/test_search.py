@@ -154,6 +154,100 @@ async def test_build_index_assigns_ordinals_and_passport_type(session: AsyncSess
     assert by_title["Внутренний"]["passport_type"] == "internal"
 
 
+async def test_build_index_includes_ticket_fields(session: AsyncSession) -> None:
+    t = Document(
+        kind="ticket",
+        title="Сапсан · Москва ↔ СПб · 22–25.05.2026",
+        owner_person_id=None,
+        status="active",
+        fields={
+            "category": "transport",
+            "subtype": "train",
+            "carrier_or_venue": "РЖД / ДОСС",
+            "from": "Москва",
+            "to": "Санкт-Петербург",
+            "departure_at": "2026-05-22T07:30",
+            "return_arrival_at": "2026-05-25T01:08",
+            "round_trip": True,
+            "passengers": [
+                {"full_name": "Добрынин Валентин"},
+                {"full_name": "Добрынина Анастасия"},
+                {"full_name": "Раскоснов Максим"},
+            ],
+        },
+        tags=["билет", "ticket", "сапсан"],
+    )
+    session.add(t)
+    await session.commit()
+
+    index = await search.build_index(session)
+    ticket_item = next(i for i in index if i["type"] == "document" and i["kind"] == "ticket")
+
+    assert ticket_item["subtype"] == "train"
+    assert ticket_item["from"] == "Москва"
+    assert ticket_item["to"] == "Санкт-Петербург"
+    assert ticket_item["departure_at"] == "2026-05-22T07:30"
+    assert ticket_item["passenger_names"] == [
+        "Добрынин Валентин",
+        "Добрынина Анастасия",
+        "Раскоснов Максим",
+    ]
+    assert ticket_item["ordinal"] is None
+    assert "МСК" in ticket_item["summary"] and "СПб" in ticket_item["summary"]
+    assert "3 пасс." in ticket_item["summary"]
+
+
+async def test_compute_document_ordinals_skips_tickets() -> None:
+    docs = [
+        Document(
+            id=10,
+            kind="ticket",
+            title="Билет 1",
+            owner_person_id=None,
+            issued_at=date(2026, 1, 1),
+            fields={},
+        ),
+        Document(
+            id=11,
+            kind="ticket",
+            title="Билет 2",
+            owner_person_id=None,
+            issued_at=date(2026, 2, 1),
+            fields={},
+        ),
+    ]
+    out = search._compute_document_ordinals(docs)
+    assert 10 not in out
+    assert 11 not in out
+
+
+async def test_resolve_query_passes_existing_persons(session: AsyncSession) -> None:
+    p = Person(full_name="Анна Иванова", relation="жена")
+    session.add(p)
+    await session.flush()
+    d = Document(kind="ticket", title="Билет", status="active", fields={})
+    session.add(d)
+    await session.commit()
+
+    captured: dict[str, object] = {}
+
+    async def _capture(**kwargs):
+        captured["messages"] = kwargs["messages"]
+        return MagicMock(
+            choices=[MagicMock(message=MagicMock(content='{"ids":[],"action":"send_text"}'))]
+        )
+
+    fake_client = MagicMock()
+    fake_client.chat.completions.create = AsyncMock(side_effect=_capture)
+
+    with patch("modules.search._client", return_value=fake_client):
+        await search.resolve_query("пришли билет жены", session)
+
+    user_msg = captured["messages"][-1]["content"]
+    assert "existing_persons" in user_msg
+    assert "Анна Иванова" in user_msg
+
+
 async def test_compute_document_ordinals_handles_missing_dates() -> None:
     """Records with no issued_at should still be ordered, and the bucket key
     should separate (kind, owner, passport_type) properly."""

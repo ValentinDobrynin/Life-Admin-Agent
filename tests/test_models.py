@@ -97,6 +97,7 @@ async def test_bot_state_upsert(session: AsyncSession) -> None:
 
 def test_enums_documented() -> None:
     assert "passport" in DOCUMENT_KINDS
+    assert "ticket" in DOCUMENT_KINDS
     assert "active" in DOCUMENT_STATUSES
     assert "жена" in PERSON_RELATIONS
     assert "awaiting_ocr_verification" in BOT_STATES

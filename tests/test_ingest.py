@@ -528,3 +528,243 @@ def test_normalise_ingest_passport_type_synonym_input() -> None:
     }
     out = ingest._normalise_ingest(payload)
     assert out["ingest"]["fields"]["passport_type"] == "foreign"
+
+
+# ---------------------------------------------------------------------------
+# ticket classification + anti-passport override
+# ---------------------------------------------------------------------------
+
+
+def _sapsan_ocr_excerpt() -> str:
+    """Minimal OCR-like fragment with ticket signals seen in SPB Train.pdf."""
+    return (
+        "ЭЛЕКТРОННЫЙ БИЛЕТ\n"
+        "КОНТРОЛЬНЫЙ КУПОН\n"
+        "ПОЕЗД 758 САПСАН\n"
+        "Перевозчик: АО «ДОСС»\n"
+        "Отправление 22.05.2026 07:30 Москва\n"
+        "Прибытие 22.05.2026 11:45 Санкт-Петербург\n"
+        "ВАГОН 01 МЕСТО 027\n"
+        "ПАСПОРТ РФ 4505997513 Добрынин Валентин Самсонович\n"
+    )
+
+
+def test_has_ticket_signals_detects_sapsan() -> None:
+    assert ingest._has_ticket_signals(_sapsan_ocr_excerpt()) is True
+    assert ingest._has_ticket_signals("") is False
+    assert ingest._has_ticket_signals("Просто одинокое слово 'поезд' без контекста") is False
+
+
+def test_normalise_ingest_overrides_passport_to_ticket_on_signals() -> None:
+    """If LLM mistakenly returned kind=passport for an e-ticket PDF, the
+    normaliser must flip it to kind=ticket and drop passport-only fields."""
+    payload = {
+        "intent": "ingest",
+        "ingest": {
+            "type": "document",
+            "kind": "passport",
+            "owner_relation": "я",
+            "owner_full_name": "Добрынин Валентин Самсонович",
+            "fields": {
+                "number": "4505997513",
+                "passport_type": "internal",
+                "series": "45",
+                "full_name": "Добрынин Валентин Самсонович",
+                "issued_by": "МВД",
+            },
+            "tags": ["паспорт", "passport"],
+            "suggested_title": "Паспорт РФ",
+        },
+    }
+    out = ingest._normalise_ingest(payload, ocr_text=_sapsan_ocr_excerpt())
+    ing = out["ingest"]
+    assert ing["kind"] == "ticket"
+    assert "passport_type" not in ing["fields"]
+    assert "series" not in ing["fields"]
+    passengers = ing["fields"].get("passengers")
+    assert isinstance(passengers, list) and passengers
+    assert passengers[0].get("full_name") == "Добрынин Валентин Самсонович"
+    assert passengers[0].get("passport") == "4505997513"
+
+
+def test_normalise_ingest_keeps_passport_without_ticket_signals() -> None:
+    payload = {
+        "intent": "ingest",
+        "ingest": {
+            "type": "document",
+            "kind": "passport",
+            "owner_relation": "я",
+            "fields": {"number": "4505997513", "series": "45"},
+            "tags": ["паспорт"],
+            "suggested_title": "Паспорт",
+        },
+    }
+    out = ingest._normalise_ingest(payload, ocr_text="Обычный скан паспорта без билетных слов")
+    assert out["ingest"]["kind"] == "passport"
+
+
+def test_augment_ticket_fields_round_trip() -> None:
+    ing = {
+        "type": "document",
+        "kind": "ticket",
+        "fields": {
+            "subtype": "поезд",
+            "departure_at": "2026-05-22T07:30",
+            "arrival_at": "2026-05-22T11:45",
+            "return_arrival_at": "2026-05-25T01:08",
+            "round_trip": True,
+        },
+    }
+    ingest._augment_ticket_fields(ing)
+    assert ing["fields"]["subtype"] == "train"
+    assert ing["fields"]["category"] == "transport"
+    assert ing["fields"]["_expires_at_hint"] == "2026-05-25"
+
+
+def test_augment_ticket_fields_one_way() -> None:
+    ing = {
+        "type": "document",
+        "kind": "ticket",
+        "fields": {
+            "subtype": "самолёт",
+            "departure_at": "2026-06-15T10:00",
+            "arrival_at": "2026-06-15T13:30",
+            "round_trip": False,
+        },
+    }
+    ingest._augment_ticket_fields(ing)
+    assert ing["fields"]["subtype"] == "plane"
+    assert ing["fields"]["category"] == "transport"
+    assert ing["fields"]["_expires_at_hint"] == "2026-06-15"
+
+
+def test_augment_ticket_fields_event() -> None:
+    ing = {
+        "type": "document",
+        "kind": "ticket",
+        "fields": {
+            "subtype": "концерт",
+            "event_at": "2026-07-20T20:00",
+            "venue": "Лужники",
+        },
+    }
+    ingest._augment_ticket_fields(ing)
+    assert ing["fields"]["subtype"] == "concert"
+    assert ing["fields"]["category"] == "event"
+    assert ing["fields"]["_expires_at_hint"] == "2026-07-20"
+
+
+def test_augment_ticket_fields_strips_passport_type() -> None:
+    ing = {
+        "type": "document",
+        "kind": "ticket",
+        "fields": {"passport_type": "internal", "subtype": "train"},
+    }
+    ingest._augment_ticket_fields(ing)
+    assert "passport_type" not in ing["fields"]
+
+
+async def test_ingest_files_saves_ticket_with_expires_at(session: AsyncSession) -> None:
+    """End-to-end: OCR with ticket signals + LLM returns kind=ticket → saved
+    as Document with expires_at from return_arrival_at and owner=null."""
+    payload = {
+        "intent": "ingest",
+        "ingest": {
+            "type": "document",
+            "kind": "ticket",
+            "owner_relation": None,
+            "owner_full_name": None,
+            "fields": {
+                "category": "transport",
+                "subtype": "train",
+                "carrier_or_venue": "РЖД / ДОСС",
+                "from": "Москва, Ленинградский вокзал",
+                "to": "Санкт-Петербург, Московский вокзал",
+                "departure_at": "2026-05-22T07:30",
+                "arrival_at": "2026-05-22T11:45",
+                "round_trip": True,
+                "return_departure_at": "2026-05-24T21:00",
+                "return_arrival_at": "2026-05-25T01:08",
+                "train_number": "758",
+                "order_number": "73564554567043",
+                "passengers": [
+                    {
+                        "full_name": "Добрынин Валентин Самсонович",
+                        "passport": "4505997513",
+                        "seat": "01/027",
+                    }
+                ],
+            },
+            "tags": ["билет", "ticket", "сапсан"],
+            "suggested_title": "Сапсан · Москва ↔ СПб · 22–25.05.2026",
+        },
+        "query": None,
+    }
+
+    async def fake_classify(*, text: str, ocr_text: str, db: AsyncSession) -> dict[str, Any]:
+        return ingest._normalise_ingest(payload, ocr_text=ocr_text)
+
+    ocr_result = ingest._OcrResult(text=_sapsan_ocr_excerpt(), truncated_pdf=None)
+
+    async def fake_ocr(files: list[ingest.FileInput]) -> ingest._OcrResult:
+        return ocr_result
+
+    def fake_upload(files: list[ingest.FileInput], prefix: str) -> list[dict[str, Any]]:
+        return [
+            {
+                "r2_key": f"{prefix}/1.pdf",
+                "filename": f.filename,
+                "content_type": f.content_type,
+            }
+            for f in files
+        ]
+
+    pdf_bytes = b"%PDF-1.4\nstub\n"
+
+    with (
+        patch("modules.ingest._classify", fake_classify),
+        patch("modules.ingest._ocr_files", fake_ocr),
+        patch("modules.ingest._upload_files_now", fake_upload),
+    ):
+        result = await ingest.ingest_files(
+            1,
+            [
+                ingest.FileInput(
+                    filename="SPB Train.pdf",
+                    content_type="application/pdf",
+                    bytes_=pdf_bytes,
+                )
+            ],
+            caption="билеты",
+            is_album=False,
+            db=session,
+        )
+
+    assert "Сохранить?" in result.text or result.keyboard is not None
+
+    bot_state = await state.get_state(session, 1)
+    assert bot_state is not None
+    assert bot_state.state == "awaiting_ocr_verification"
+
+    await ingest.confirm_draft(1, session)
+
+    saved = (
+        (await session.execute(select(Document).where(Document.kind == "ticket"))).scalars().all()
+    )
+    assert len(saved) == 1
+    doc = saved[0]
+    assert doc.owner_person_id is None
+    assert doc.expires_at is not None
+    assert doc.expires_at.isoformat() == "2026-05-25"
+    assert doc.issued_at is None
+    assert "_expires_at_hint" not in (doc.fields or {})
+    assert "билет" in doc.tags and "ticket" in doc.tags
+
+
+async def test_find_duplicate_skips_ticket(session: AsyncSession) -> None:
+    t1 = Document(kind="ticket", title="Билет 1", owner_person_id=None, status="active")
+    session.add(t1)
+    await session.commit()
+
+    dup = await ingest._find_duplicate(session, "ticket", None)
+    assert dup is None

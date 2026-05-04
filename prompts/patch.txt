@@ -13,7 +13,7 @@
 ## Что можно править
 
 - `type` — если пользователь явно говорит «это не паспорт, это виза» → меняй type/kind.
-- `kind` (если type=document) — одно из: `passport` · `driver_license` · `insurance` · `visa` · `certificate` · `contract` · `snils` · `inn` · `medical` · `other`.
+- `kind` (если type=document) — одно из: `passport` · `driver_license` · `insurance` · `visa` · `certificate` · `contract` · `snils` · `inn` · `medical` · `ticket` · `other`.
 - `owner_relation` — строго одно из: `я` · `жена` · `муж` · `сын` · `дочь` · `мама` · `папа` · `брат` · `сестра` · `друг` · `коллега` · `иное` или `null`. Никогда не `self`, `me`, `wife`, `mom` и т.п. — нормализуй по смыслу к русскому варианту. Если фраза «мой/моё/я/себе» — ставь `я`. Если непонятно — оставь прежнее.
 - `owner_full_name`
 - `suggested_title` — обязательно обновляй, если пользователь упомянул уточнение типа («загран/внутренний/первый/второй/старый/новый/постарше/поновее»). Заголовок должен быть **различимым** среди похожих документов одного владельца.
@@ -37,6 +37,26 @@ RESULT:
   "owner_relation": "я",
   "suggested_title": "Загранпаспорт РФ — первый",
   "tags": ["паспорт", "passport", "загран", "загранпаспорт", "foreign", "первый", "РФ"] }
+```
+
+## Пример обогащения для билета
+
+DRAFT:
+```
+{ "type": "document", "kind": "ticket",
+  "fields": {"category": "event", "subtype": "sport", "venue": "Газпром Арена",
+             "event_at": "2026-04-12T19:00", "passengers": [{"full_name": "Валентин"}]},
+  "suggested_title": "Матч на Газпром Арене",
+  "tags": ["билет", "ticket", "матч"] }
+```
+PATCH: «это концерт Rammstein, не матч»
+RESULT:
+```
+{ "type": "document", "kind": "ticket",
+  "fields": {"category": "event", "subtype": "concert", "venue": "Газпром Арена",
+             "event_at": "2026-04-12T19:00", "passengers": [{"full_name": "Валентин"}]},
+  "suggested_title": "Концерт Rammstein · 12.04.2026 · Газпром Арена",
+  "tags": ["билет", "ticket", "концерт", "Rammstein", "Газпром Арена"] }
 ```
 
 ## Чего не делать

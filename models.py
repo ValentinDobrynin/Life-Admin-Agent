@@ -44,6 +44,7 @@ DOCUMENT_KINDS = {
     "snils",
     "inn",
     "medical",
+    "ticket",
     "other",
 }
 

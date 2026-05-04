@@ -98,6 +98,47 @@
 
 ## ✅ Done
 
+### [FEATURE-112] Билеты как отдельный kind=ticket (транспорт и события)
+
+**Status:** ✅ Done
+**Priority:** High
+**Component:** `models.py`, `prompts/classify.txt`, `prompts/patch.txt`, `prompts/retrieve.txt`, `modules/ingest.py`, `modules/cards.py`, `modules/search.py`
+
+**Problem Description**
+Многостраничный PDF с электронными билетами (например, Сапсан на трёх пассажиров туда-обратно) распознавался как `kind=passport`, потому что в OCR присутствуют строки «ПАСПОРТ РФ NNNNNNNNNN» — удостоверения пассажиров. В результате одна поездка вкидывалась как «паспорт», с первым попавшимся ФИО и 10-значным номером, заносилась в паспортные бакеты и мешала поиску реальных паспортов.
+
+**Expected Behavior**
+- `kind=ticket` поддерживается как отдельный вид документа (универсальный: и транспорт, и события).
+- Одна поездка / одно событие = одна запись `Document`. Пассажиры / гости живут в `fields.passengers[]`, а не в top-level `owner`.
+- LLM видит явные сигналы билета (ЭЛЕКТРОННЫЙ БИЛЕТ, ВАГОН, МЕСТО, Отправление, Перевозчик, САПСАН/ФПК/…) и ставит `kind=ticket`; «ПАСПОРТ РФ NNNN» в таком контексте трактуется как паспорт пассажира.
+- Нормализатор ingest делает страховочный override: если LLM вернул `kind=passport`, но OCR содержит сигналы билета — kind переключается на ticket, а passport-поля чистятся.
+- Карточка билета показывает маршрут/событие, номера/места, блок пассажиров и сумму; emoji зависит от subtype (🚆 / ✈️ / ⚽ / 🎤 / …).
+- В индексе ретрива для билетов есть `subtype`, `from`, `to`, `departure_at`/`event_at`, `passenger_names`, а в summary видны маршрут и число пассажиров.
+- `expires_at` билета вычисляется из `return_arrival_at or arrival_at or event_at` — так билеты автоматически попадают в expiry-дайджест перед поездкой.
+- Дубликаты для ticket не ищутся — каждая поездка самостоятельна.
+
+**Resolution**
+- `models.py`: в `DOCUMENT_KINDS` добавлено `"ticket"`.
+- `prompts/classify.txt`: новая секция про ticket (поля, `category`/`subtype`, `passengers`), список сигналов, жёсткое правило «ПАСПОРТ РФ + сигналы билета → kind=ticket», расширены правила для `tags` и `suggested_title` (до 80 символов, примеры вида «Сапсан · Москва ↔ СПб · 22–25.05.2026»).
+- `prompts/patch.txt`: `ticket` добавлен в allowed kinds, пример «это концерт, не матч».
+- `prompts/retrieve.txt`: в индексе для документов появились `subtype`/`from`/`to`/`departure_at`/`event_at`/`passenger_names`, в payload поиска — `existing_persons`; прописаны правила «билет жены в Питер», «ближайший билет», «subtype в запросе».
+- `modules/ingest.py`: добавлены `_TICKET_SIGNAL_PATTERNS`, `_has_ticket_signals`, `_normalise_ticket_subtype`, `_infer_ticket_category`, `_ticket_expires_hint`, `_augment_ticket_fields`, `_override_passport_to_ticket_if_needed`; `_normalise_ingest` принимает `ocr_text` и применяет override + ticket-аугментацию; `_save_record` для `kind=ticket` сохраняет `issued_at=None`, `expires_at` из `_expires_at_hint`, `owner_person_id=None`, добавляет теги `билет`/`ticket`; `_find_duplicate` пропускает ticket.
+- `modules/cards.py`: новые таблицы `_LABELS_TICKET_TRANSPORT` / `_LABELS_TICKET_EVENT`, словари `_TICKET_SUBTYPE_EMOJI` / `_TICKET_SUBTYPE_RU`, fallback-тайтл `_ticket_title`, рендер блока «Пассажиры:» (до 5 строк + «и ещё N»); emoji в карточке для документов выбирается с учётом `subtype` билета; top-level «Срок до / Выдан» не дублируются для билетов.
+- `modules/search.py`: `_summary_ticket` (РЖД · МСК↔СПб · 22–25.05 · 3 пасс.), новые поля в `build_index` (`subtype`/`from`/`to`/`departure_at`/`event_at`/`passenger_names`), `_compute_document_ordinals` пропускает ticket, `resolve_query` прокидывает `existing_persons` в payload.
+- Тесты: добавлены юнит-тесты на `_has_ticket_signals`, `_augment_ticket_fields` (round-trip / one-way / event / ticket без passport_type), override `passport → ticket`, сохранение билета через `ingest_files` + `confirm_draft` с ожидаемым `expires_at=2026-05-25`, пропуск дубликатов ticket, ticket-поля в `build_index`, `_compute_document_ordinals` пропускает ticket, `resolve_query` кладёт `existing_persons` в payload, рендер карточки ticket-транспорта (пассажиры + маршрут) и event-билета (fallback-тайтл), rendering record card без дубля «Срок до». В `tests/test_cards.py`, `tests/test_search.py`, `tests/test_ingest.py`, `tests/test_models.py`.
+- `make check`: 105 тестов, все проходят; mypy чист.
+
+**Acceptance Criteria**
+- [x] `DOCUMENT_KINDS` содержит `ticket`, миграции не требуются.
+- [x] OCR-фикстура с «ЭЛЕКТРОННЫЙ БИЛЕТ» + «ПАСПОРТ РФ» после `_normalise_ingest` даёт `kind=ticket`, passport-поля сняты, пассажир перенесён в `fields.passengers[0]`.
+- [x] Сохранённый билет с `round_trip=true` получает `expires_at = return_arrival_at[:10]`, `owner_person_id=None`, теги содержат `билет`/`ticket`.
+- [x] Карточка верификации ticket-транспорта показывает emoji 🚆, маршрут, пассажиров, «Туда-обратно: да»; event-билета — 🎤, дату и площадку.
+- [x] В индексе билет имеет поля `subtype`, `from`, `to`, `departure_at`, `passenger_names`, `ordinal=null`, `summary` вида «… · МСК↔СПб · 22-25.05 · 3 пасс.».
+- [x] `_find_duplicate(kind='ticket', ...)` всегда возвращает `None`.
+- [x] `make check` зелёный.
+
+---
+
 ### [FEATURE-110] Различимость документов одного типа: passport_type, ordinal, обогащение тегов
 
 **Status:** ✅ Done

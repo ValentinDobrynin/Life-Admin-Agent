@@ -56,7 +56,90 @@ def _trim(value: Any, length: int = 60) -> str:
     return s if len(s) <= length else s[: length - 1] + "…"
 
 
+_TICKET_CITY_SHORTS: dict[str, str] = {
+    "москва": "МСК",
+    "санкт-петербург": "СПб",
+    "санкт петербург": "СПб",
+    "спб": "СПб",
+    "питер": "СПб",
+}
+
+
+def _short_city(value: Any) -> str:
+    if not value:
+        return ""
+    s = str(value).split(",")[0].strip()
+    return _TICKET_CITY_SHORTS.get(s.lower(), s)
+
+
+def _fmt_short_date(value: Any) -> str:
+    if not value:
+        return ""
+    s = str(value)
+    if len(s) < 10:
+        return ""
+    try:
+        y, m, d = s[:10].split("-")
+        return f"{int(d):02d}.{int(m):02d}"
+    except ValueError:
+        return s[:10]
+
+
+def _passenger_names(fields: dict[str, Any]) -> list[str]:
+    passengers = fields.get("passengers")
+    if not isinstance(passengers, list):
+        return []
+    names: list[str] = []
+    for p in passengers:
+        if isinstance(p, dict):
+            name = p.get("full_name") or p.get("name")
+            if name:
+                names.append(str(name))
+    return names
+
+
+def _summary_ticket(d: Document) -> str:
+    f = d.fields or {}
+    category = f.get("category")
+    subtype = f.get("subtype")
+    carrier = f.get("carrier_or_venue")
+    passengers = _passenger_names(f)
+    pax_part = f"{len(passengers)} пасс." if passengers else ""
+    if category == "transport":
+        head = str(carrier or "Билет")
+        route_parts = [_short_city(f.get("from")), _short_city(f.get("to"))]
+        arrow = "↔" if f.get("round_trip") else "→"
+        route = arrow.join(p for p in route_parts if p)
+        when = _fmt_short_date(f.get("departure_at"))
+        ret = _fmt_short_date(f.get("return_arrival_at") or f.get("return_departure_at"))
+        if ret and when and ret != when:
+            when = f"{when}-{ret}"
+        parts = [head]
+        if route:
+            parts.append(route)
+        if when:
+            parts.append(when)
+        if pax_part:
+            parts.append(pax_part)
+        return " · ".join(parts)
+    if category == "event":
+        head = str(carrier or f.get("venue") or "Событие")
+        when = _fmt_short_date(f.get("event_at"))
+        parts = [head]
+        if when:
+            parts.append(when)
+        if pax_part:
+            parts.append(pax_part)
+        return " · ".join(parts)
+    parts = [str(d.title or subtype or "Билет")]
+    if pax_part:
+        parts.append(pax_part)
+    return " · ".join(parts)
+
+
 def _summary_document(d: Document) -> str:
+    if d.kind == "ticket":
+        return _summary_ticket(d)
     f = d.fields or {}
     parts = [str(d.title)]
     if d.expires_at:
@@ -110,9 +193,14 @@ async def _person_lookup(db: AsyncSession) -> dict[int, Person]:
 def _compute_document_ordinals(docs: Sequence[Document]) -> dict[int, int]:
     """For each (kind, owner_person_id, passport_type) bucket, assign 1..N ordered
     by issued_at ascending (None last). 1 = oldest = "первый".
+
+    Tickets are intentionally skipped: each trip/event is a standalone record and
+    ordinal numbering over tickets does not match user mental model.
     """
     buckets: dict[tuple[str | None, int | None, str | None], list[Document]] = {}
     for d in docs:
+        if d.kind == "ticket":
+            continue
         passport_type = (d.fields or {}).get("passport_type") if d.kind == "passport" else None
         key = (d.kind, d.owner_person_id, passport_type)
         buckets.setdefault(key, []).append(d)
@@ -159,22 +247,28 @@ async def build_index(db: AsyncSession) -> list[dict[str, Any]]:
     for d in docs:
         owner = persons.get(d.owner_person_id) if d.owner_person_id else None
         fields = d.fields or {}
-        index.append(
-            {
-                "type": "document",
-                "id": d.id,
-                "title": d.title,
-                "kind": d.kind,
-                "owner_relation": owner.relation if owner else None,
-                "owner_full_name": owner.full_name if owner else None,
-                "tags": d.tags or [],
-                "summary": _summary_document(d),
-                "passport_type": fields.get("passport_type") if d.kind == "passport" else None,
-                "country": fields.get("country"),
-                "ordinal": ordinals.get(d.id),
-                "issued_at": d.issued_at.isoformat() if d.issued_at else None,
-            }
-        )
+        item: dict[str, Any] = {
+            "type": "document",
+            "id": d.id,
+            "title": d.title,
+            "kind": d.kind,
+            "owner_relation": owner.relation if owner else None,
+            "owner_full_name": owner.full_name if owner else None,
+            "tags": d.tags or [],
+            "summary": _summary_document(d),
+            "passport_type": fields.get("passport_type") if d.kind == "passport" else None,
+            "country": fields.get("country"),
+            "ordinal": ordinals.get(d.id),
+            "issued_at": d.issued_at.isoformat() if d.issued_at else None,
+        }
+        if d.kind == "ticket":
+            item["subtype"] = fields.get("subtype")
+            item["from"] = fields.get("from")
+            item["to"] = fields.get("to")
+            item["departure_at"] = fields.get("departure_at")
+            item["event_at"] = fields.get("event_at")
+            item["passenger_names"] = _passenger_names(fields)
+        index.append(item)
 
     vehs = (await db.execute(select(Vehicle).order_by(Vehicle.id))).scalars().all()
     for v in vehs:
@@ -231,6 +325,20 @@ async def build_index(db: AsyncSession) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
+async def _existing_persons_for_retrieve(db: AsyncSession) -> list[dict[str, Any]]:
+    result = await db.execute(select(Person))
+    out: list[dict[str, Any]] = []
+    for p in result.scalars().all():
+        out.append(
+            {
+                "id": p.id,
+                "full_name": p.full_name,
+                "relation": p.relation,
+            }
+        )
+    return out
+
+
 async def resolve_query(query: str, db: AsyncSession) -> RetrieveResult:
     """Run retrieve.txt over (query, index) and return the parsed RetrieveResult."""
     index = await build_index(db)
@@ -243,7 +351,8 @@ async def resolve_query(query: str, db: AsyncSession) -> RetrieveResult:
     if soul:
         system = soul + "\n\n---\n\n" + retrieve_prompt
 
-    payload = {"query": query, "index": index}
+    existing_persons = await _existing_persons_for_retrieve(db)
+    payload = {"query": query, "existing_persons": existing_persons, "index": index}
 
     client = _client()
     try:
